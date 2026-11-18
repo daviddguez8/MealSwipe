@@ -1,0 +1,43 @@
+<title>MealSwipe</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=Inter:wght@400;500;600;700&display=swap">
+<style>
+/* Layout: one-column swipe deck on phones; plan + grocery list side by side on desktop.
+   Colors are RGB channels so Tailwind opacity modifiers (bg-good/15) work. */
+:root {
+  --bg: 244 246 243; --surface: 255 255 255; --ink: 24 33 29; --muted: 92 106 99;
+  --line: 222 228 224; --chip: 236 240 237; --accent: 222 76 40; --onaccent: 255 255 255;
+  --good: 30 145 96; --warn: 190 120 20; --danger: 206 50 62; --pass: 206 50 62; --scrim: 10 14 12;
+  --font-display: "Bricolage Grotesque", "Avenir Next", system-ui, sans-serif;
+  --font-body: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: 15 20 18; --surface: 26 33 30; --ink: 236 241 238; --muted: 156 170 163;
+  --line: 45 55 51; --chip: 35 44 40; --accent: 255 118 80; --onaccent: 26 12 8;
+  --good: 70 196 140; --warn: 240 176 70; --danger: 255 104 112; --pass: 255 104 112; --scrim: 0 0 0;
+  color-scheme: dark; } }
+:root[data-theme="dark"] {
+  --bg: 15 20 18; --surface: 26 33 30; --ink: 236 241 238; --muted: 156 170 163;
+  --line: 45 55 51; --chip: 35 44 40; --accent: 255 118 80; --onaccent: 26 12 8;
+  --good: 70 196 140; --warn: 240 176 70; --danger: 255 104 112; --pass: 255 104 112; --scrim: 0 0 0;
+  color-scheme: dark; }
+html, body { height: 100%; }
+body { background: rgb(var(--bg)); color: rgb(var(--ink)); font-family: var(--font-body); -webkit-tap-highlight-color: transparent; }
+body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 45; background: rgb(var(--bg)); }
+#root { min-height: 100%; }
+.gutter { padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+.text-balance { text-wrap: balance; }
+@keyframes sheetIn { from { transform: translateY(24px); opacity: 0; } to { transform: none; opacity: 1; } }
+.sheet-in { animation: sheetIn 220ms cubic-bezier(.2,.8,.3,1); }
+.bg-scrim { background: rgb(var(--scrim) / .45); }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition-duration: 1ms !important; animation-duration: 1ms !important; } }
+#boot { display:flex; align-items:center; justify-content:center; min-height:60vh; font-family: var(--font-display); color: rgb(var(--muted)); }
+</style>
+<style>/*__TW__*/</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<div id="root"><div id="boot">Loading MealSwipe…</div></div>
+<script>
+/*__APP__*/
+</script>
