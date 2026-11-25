@@ -789,7 +789,131 @@ function JsonModal({ recipes, fullState, onImport, onRestoreBackup, onClose }) {
 }
 
 // ---------------------------------------------------------------------------
-function SettingsModal({ settings, setSettings, onClose, onReset, store, sync, onSignOut }) {
+// A memorable code like the one the household started with: word-word-word-00.
+const CODE_WORDS = [
+  "taco", "jicama", "chile", "mole", "salsa", "elote", "nopal", "tamal", "pozole", "lime", "cilantro", "queso",
+  "basil", "pesto", "ramen", "miso", "curry", "falafel", "lemon", "olive", "paprika", "ginger", "mango", "pepper",
+];
+function suggestPasscode() {
+  const r = (n) => {
+    try {
+      const a = new Uint32Array(1);
+      window.crypto.getRandomValues(a);
+      return a[0] % n;
+    } catch (e) {
+      return Math.floor(Math.random() * n);
+    }
+  };
+  const words = [];
+  while (words.length < 3) {
+    const w = CODE_WORDS[r(CODE_WORDS.length)];
+    if (!words.includes(w)) words.push(w);
+  }
+  return `${words.join("-")}-${String(r(100)).padStart(2, "0")}`;
+}
+
+function ChangePasscodeModal({ store, onClose }) {
+  const [current, setCurrent] = useState("");
+  const [next, setNext] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [done, setDone] = useState(null);
+  const [copied, setCopied] = useState(false);
+  const n = next.trim();
+  const problem = !n
+    ? ""
+    : n.length < 8
+    ? "At least 8 characters."
+    : confirm.trim() && confirm.trim() !== n
+    ? "The two new passcodes don't match."
+    : n === current.trim()
+    ? "That's the same as the current passcode."
+    : "";
+  const ready = current.trim() && n.length >= 8 && confirm.trim() === n && !problem && !busy;
+  const input = "w-full rounded-xl border border-line bg-bg px-3 py-3 text-base text-ink focus:outline-none focus:border-accent";
+  const label = "text-xs font-bold uppercase tracking-wide text-muted";
+
+  if (done)
+    return (
+      <Modal title="Passcode changed" onClose={onClose}>
+        <div className="space-y-4">
+          <p className="text-sm">The household passcode is now:</p>
+          <div className="flex items-center gap-2">
+            <code className="min-w-0 flex-1 break-all rounded-xl bg-chip px-3 py-3 font-mono text-base">{done}</code>
+            <Btn
+              variant="soft"
+              onClick={async () => {
+                try {
+                  await navigator.clipboard.writeText(done);
+                  setCopied(true);
+                } catch (e) {}
+              }}
+            >
+              {copied ? <Check size={15} /> : <Copy size={15} />} {copied ? "Copied" : "Copy"}
+            </Btn>
+          </div>
+          <p className="text-xs text-muted">Other phones and computers were signed out and will ask for the new passcode. Share it with your household.</p>
+          <Btn variant="primary" className="w-full" onClick={onClose}>Done</Btn>
+        </div>
+      </Modal>
+    );
+
+  return (
+    <Modal title="Change passcode" onClose={busy ? () => {} : onClose}>
+      <form
+        className="space-y-4"
+        onSubmit={async (e) => {
+          e.preventDefault();
+          if (!ready) return;
+          setBusy(true);
+          setError("");
+          try {
+            await store.changePasscode(current, n);
+            setDone(n);
+          } catch (err) {
+            setError(err.message);
+          } finally {
+            setBusy(false);
+          }
+        }}
+      >
+        <p className="text-sm text-muted">Everyone else will be signed out and asked for the new passcode. Your week, recipes and list stay the same.</p>
+        <label className="block space-y-1">
+          <span className={label}>Current passcode</span>
+          <input id="current-passcode" autoFocus autoComplete="current-password" autoCapitalize="none" spellCheck={false} value={current} onChange={(e) => setCurrent(e.target.value)} className={input} />
+        </label>
+        <label className="block space-y-1">
+          <span className="flex items-center justify-between">
+            <span className={label}>New passcode</span>
+            <button
+              type="button"
+              className="inline-flex items-center gap-1 text-xs font-semibold text-accent"
+              onClick={() => {
+                const c = suggestPasscode();
+                setNext(c);
+                setConfirm(c);
+              }}
+            >
+              <Shuffle size={13} /> Suggest one
+            </button>
+          </span>
+          <input id="new-passcode" autoComplete="new-password" autoCapitalize="none" spellCheck={false} value={next} onChange={(e) => setNext(e.target.value)} className={input} placeholder="word-word-word-00" />
+        </label>
+        <label className="block space-y-1">
+          <span className={label}>New passcode again</span>
+          <input id="confirm-passcode" autoComplete="new-password" autoCapitalize="none" spellCheck={false} value={confirm} onChange={(e) => setConfirm(e.target.value)} className={input} />
+        </label>
+        {(problem || error) && <p className="text-sm font-semibold text-danger">{error || problem}</p>}
+        <button type="submit" disabled={!ready} className="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-accent text-onaccent px-4 py-3 font-bold disabled:opacity-50">
+          {busy ? <Loader2 size={18} className="animate-spin" /> : <KeyRound size={18} />} Change passcode
+        </button>
+      </form>
+    </Modal>
+  );
+}
+
+function SettingsModal({ settings, setSettings, onClose, onReset, store, sync, onSignOut, onChangePasscode }) {
   const [confirmReset, setConfirmReset] = useState(false);
   const s = settings;
   const upd = (k, v) => setSettings((p) => ({ ...p, [k]: v }));
@@ -841,9 +965,14 @@ function SettingsModal({ settings, setSettings, onClose, onReset, store, sync, o
               <div className="font-semibold">Shared household</div>
               <div className="text-xs text-muted">Everyone with the passcode sees the same week. {sync.status === "offline" ? "Can't reach the server right now, so changes will save when it's back." : "Changes sync live."}</div>
             </div>
-            <Btn variant="soft" onClick={onSignOut}>
-              <LogOut size={15} /> Sign out
-            </Btn>
+            <div className="flex shrink-0 flex-col gap-2">
+              <Btn variant="soft" onClick={onChangePasscode}>
+                <KeyRound size={15} /> Change passcode
+              </Btn>
+              <Btn variant="soft" onClick={onSignOut}>
+                <LogOut size={15} /> Sign out
+              </Btn>
+            </div>
           </div>
         )}
         <div className="border-t border-line pt-4">
@@ -1496,7 +1625,8 @@ function Planner({ initial, store, onSignOut }) {
           onClose={() => setModal(null)}
         />
       )}
-      {modal?.type === "settings" && <SettingsModal settings={settings} setSettings={setSettings} onClose={() => setModal(null)} onReset={resetAll} store={store} sync={sync} onSignOut={onSignOut} />}
+      {modal?.type === "settings" && <SettingsModal settings={settings} setSettings={setSettings} onClose={() => setModal(null)} onReset={resetAll} store={store} sync={sync} onSignOut={onSignOut} onChangePasscode={() => setModal({ type: "passcode" })} />}
+      {modal?.type === "passcode" && <ChangePasscodeModal store={store} onClose={() => setModal(null)} />}
       {modal?.type === "copy" && (
         <Modal title="Copy your list" onClose={() => setModal(null)}>
           <p className="mb-2 text-sm text-muted">Your browser blocked automatic copying. The text is selected: press Ctrl/Cmd+C.</p>
@@ -1568,6 +1698,16 @@ export default function MealSwipe() {
   const [initial, setInitial] = useState(() => (store.needsPasscode ? null : hydrate(store.loadSync())));
   const [error, setError] = useState("");
   const [session, setSession] = useState(0);
+  const CHANGED_MSG = "The household passcode was changed. Enter the new one.";
+
+  // Someone changed the passcode on another device: ask this one for the new code.
+  useEffect(() => {
+    store.onSignedOut(() => {
+      setInitial(null);
+      setError(CHANGED_MSG);
+      setPhase("gate");
+    });
+  }, [store]);
 
   const open = useCallback(async () => {
     try {
@@ -1576,7 +1716,7 @@ export default function MealSwipe() {
       setPhase("ready");
       setSession((n) => n + 1);
     } catch (e) {
-      setError(e.message);
+      setError(e.authLost ? CHANGED_MSG : e.message);
       setPhase(/passcode/i.test(e.message) ? "gate" : "failed");
     }
   }, [store]);

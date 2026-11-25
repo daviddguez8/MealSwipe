@@ -10,6 +10,9 @@
 //   store.subscribe(fn)   fn(savedState) when someone else changes the data
 //   store.onStatus(fn)    fn("saved" | "saving" | "offline" | "error", detail)
 //   store.signOut()
+//   store.changePasscode(current, next)   shared backends only
+//   store.onSignedOut(fn)  fn(reason) when this device's passcode stops working
+//                          (someone changed it), so the app can ask for the new one
 // ============================================================================
 
 const LOCAL_KEY = "mealswipe.v1";
@@ -74,6 +77,7 @@ function createLocalStore() {
       statusFn = fn;
     },
     signOut() {},
+    onSignedOut() {},
   };
 }
 
@@ -108,14 +112,45 @@ function createSupabaseStore({ url, key, createClient }) {
   let listeners = [];
   let statusFn = () => {};
   let pollTimer = null;
+  let signedOutFn = () => {};
+  let changing = false;
 
   const pending = () => Boolean(timer || inFlight);
 
-  async function rpc(name, args) {
-    const { data, error } = await client.rpc(name, { code, ...args });
+  // A wrong-passcode answer (not the "too many tries" one) means the code saved
+  // on this device no longer opens the household.
+  const isWrongCode = (msg) => /doesn.t match a household/i.test(msg || "");
+
+  async function rpc(name, args, useCode = code) {
+    const { data, error } = await client.rpc(name, { code: useCode, ...args });
     if (error) throw new Error(error.message || "Couldn't reach the server.");
-    if (data && data.error) throw new Error(data.error);
+    if (data && data.error) {
+      const err = new Error(data.error);
+      // Only treat it as "signed out" if nobody changed the code locally meanwhile.
+      err.authLost = isWrongCode(data.error) && useCode === code && !changing;
+      throw err;
+    }
     return data;
+  }
+
+  function stopSync() {
+    clearTimeout(timer);
+    timer = null;
+    if (channel) client.removeChannel(channel);
+    channel = null;
+    clearInterval(pollTimer);
+    document.removeEventListener("visibilitychange", onVisible);
+    base = null;
+    latest = null;
+  }
+
+  // Stop polling right away: every retry with a stale code counts as a wrong try.
+  function authLost() {
+    code = "";
+    lsSet(CODE_KEY, null);
+    stopSync();
+    statusFn("offline", "");
+    signedOutFn("passcode-changed");
   }
 
   async function refresh() {
@@ -128,6 +163,7 @@ function createSupabaseStore({ url, key, createClient }) {
       listeners.forEach((fn) => fn(data));
       statusFn("saved");
     } catch (e) {
+      if (e.authLost) return authLost();
       statusFn("offline", e.message);
     }
   }
@@ -153,9 +189,19 @@ function createSupabaseStore({ url, key, createClient }) {
       else if (missedOthers) refresh();
     } catch (e) {
       inFlight = false;
+      if (e.authLost) return authLost();
       statusFn("offline", e.message);
       timer = setTimeout(flush, 5000);
     }
+  }
+
+  // Save anything still waiting, so it lands before the passcode changes.
+  async function flushNow() {
+    if (timer) {
+      clearTimeout(timer);
+      await flush();
+    }
+    for (let i = 0; inFlight && i < 50; i++) await new Promise((r) => setTimeout(r, 100));
   }
 
   function schedule() {
@@ -168,6 +214,11 @@ function createSupabaseStore({ url, key, createClient }) {
     if (channel) client.removeChannel(channel);
     channel = client.channel(`ms-${topic}`, { config: { broadcast: { self: false } } });
     channel.on("broadcast", { event: "changed" }, (msg) => {
+      if (msg.payload && msg.payload.by === clientId) return;
+      refresh();
+    });
+    // Another device changed the passcode: re-check now, which signs this one out.
+    channel.on("broadcast", { event: "passcode-changed" }, (msg) => {
       if (msg.payload && msg.payload.by === clientId) return;
       refresh();
     });
@@ -212,13 +263,33 @@ function createSupabaseStore({ url, key, createClient }) {
     onStatus(fn) {
       statusFn = fn;
     },
+    onSignedOut(fn) {
+      signedOutFn = fn;
+    },
+    // Needs the current passcode typed again, even though this device knows it.
+    async changePasscode(current, next) {
+      const cur = String(current || "").trim();
+      const nc = String(next || "").trim();
+      await flushNow();
+      changing = true;
+      try {
+        const res = await rpc("ms_change_passcode", { new_code: nc }, cur);
+        code = nc;
+        lsSet(CODE_KEY, nc);
+        // Tell the other devices on the old channel, then move to the new one.
+        if (channel) {
+          await channel.send({ type: "broadcast", event: "passcode-changed", payload: { by: clientId } });
+        }
+        connectRealtime(res.channel);
+        return true;
+      } finally {
+        changing = false;
+      }
+    },
     signOut() {
       code = "";
       lsSet(CODE_KEY, null);
-      if (channel) client.removeChannel(channel);
-      clearInterval(pollTimer);
-      document.removeEventListener("visibilitychange", onVisible);
-      base = null;
+      stopSync();
     },
   };
 }
