@@ -1236,7 +1236,7 @@ function FilterPanel({ options, filters, onToggle, onClear }) {
 }
 
 // ratingOf(recipe) -> 1..5 or null. Wired to household ratings once they exist.
-function LibraryView({ onOpen, recipes, decisions, plan, onEdit, onDelete, onAdd, onJson, onRestore, missingStarters, onToggleWeek, settings, ratingOf }) {
+function LibraryView({ onOpen, recipes, decisions, plan, onEdit, onDelete, onAdd, onJson, onRestore, missingStarters, onToggleWeek, settings, ratingOf, isHidden }) {
   const [q, setQ] = useState("");
   const [confirm, setConfirm] = useState(null);
   const [view, setViewState] = useState(() => cleanView(loadViewPrefs()));
@@ -1249,7 +1249,10 @@ function LibraryView({ onOpen, recipes, decisions, plan, onEdit, onDelete, onAdd
     });
   const [filters, setFilters] = useState(emptyFilters);
   const [showFilters, setShowFilters] = useState(false);
-  const statusOf = useCallback((r) => (plan[r.id] != null ? "week" : decisions[r.id] === "pass" ? "passed" : "deck"), [plan, decisions]);
+  const statusOf = useCallback(
+    (r) => (isHidden && isHidden(r) ? "hidden" : plan[r.id] != null ? "week" : decisions[r.id] === "pass" ? "passed" : "deck"),
+    [plan, decisions, isHidden]
+  );
   const ctx = useMemo(() => ({ ratingOf, statusOf }), [ratingOf, statusOf]);
   const options = useMemo(() => filterOptions(recipes, ctx), [recipes, ctx]);
   const nFilters = activeFilterCount(filters);
@@ -1364,7 +1367,7 @@ function LibraryView({ onOpen, recipes, decisions, plan, onEdit, onDelete, onAdd
       <ul className="grid gap-2.5 sm:grid-cols-2">
         {g.items.map((r) => {
           const inWeek = plan[r.id] != null;
-          const state = inWeek ? "In this week" : decisions[r.id] === "pass" ? "Passed" : "In deck";
+          const state = isHidden && isHidden(r) ? "Hidden" : inWeek ? "In this week" : decisions[r.id] === "pass" ? "Passed" : "In deck";
           return (
             <li key={r.id} className="flex flex-col gap-3 rounded-2xl bg-surface border border-line p-3">
               <div className="flex gap-3">
@@ -1444,6 +1447,9 @@ function Planner({ initial, store, onSignOut }) {
   // Household ratings ({ [recipeId]: 1..5 }); empty until ratings are stored.
   const ratings = state.ratings;
   const ratingOf = useCallback((r) => (ratings && ratings[r.id] != null ? ratings[r.id] : null), [ratings]);
+  // Hidden recipes ({ [recipeId]: true }); empty until the Hide feature lands.
+  const hidden = state.hidden;
+  const isHidden = useCallback((r) => !!((hidden && hidden[r.id]) || r.hidden), [hidden]);
 
   useEffect(() => {
     store.onStatus((status, detail) => {
@@ -1778,6 +1784,7 @@ function Planner({ initial, store, onSignOut }) {
             missingStarters={missingStarters}
             onToggleWeek={toggleWeek}
             ratingOf={ratingOf}
+            isHidden={isHidden}
             onOpen={(r) => setDetail({ id: r.id, fromDeck: false })}
           />
         )}

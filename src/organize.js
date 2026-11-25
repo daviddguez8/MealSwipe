@@ -6,7 +6,8 @@
 //
 // ctx lets the app plug in data that doesn't live on the recipe itself:
 //   ctx.ratingOf(recipe) -> number 1..5, or null when unrated
-//   ctx.statusOf(recipe) -> "week" | "deck" | "passed"
+//   ctx.statusOf(recipe) -> "week" | "deck" | "passed" | "hidden"
+// Hidden recipes are left out unless the Status filter includes "hidden".
 // Ratings come from the household's data; until they exist every recipe is unrated.
 //
 // Filters: { ingredients: [key], cuisine: [key], time: [key], ... }
@@ -89,6 +90,7 @@ const STATUSES = [
   { key: "week", label: "In this week" },
   { key: "deck", label: "In deck" },
   { key: "passed", label: "Passed" },
+  { key: "hidden", label: "Hidden" },
 ];
 // r.source is "classic" | "custom" (an edited classic) | "own". Older data only has r.custom.
 const SOURCES = [
@@ -110,7 +112,8 @@ function ratingValue(r, ctx) {
 function ratingGroup(r, ctx) {
   const v = ratingValue(r, ctx);
   if (v == null) return { key: "r0", label: "Unrated", order: 99 };
-  const stars = Math.max(1, Math.min(5, Math.round(v)));
+  // Half stars are allowed, so group on the nearest half: 5, 4.5, 4, ...
+  const stars = Math.max(0.5, Math.min(5, Math.round(v * 2) / 2));
   return { key: `r${stars}`, label: `${stars} ${stars === 1 ? "star" : "stars"}`, order: 5 - stars };
 }
 
@@ -259,7 +262,11 @@ export function matchesFilters(r, filters, ctx = {}) {
 
 export function organizeRecipes(recipes, { q = "", groupBy = "none", sortBy = "recent", filters = null, ctx = {} } = {}) {
   const index = new Map(recipes.map((r, i) => [r.id, i]));
-  const list = recipes.filter((r) => matchesQuery(r, q) && matchesFilters(r, filters, ctx)).sort(sorter(sortBy, ctx, index));
+  const showHidden = !!(filters && filters.status && filters.status.includes("hidden"));
+  const visible = (r) => showHidden || !(ctx.statusOf && ctx.statusOf(r) === "hidden");
+  const list = recipes
+    .filter((r) => visible(r) && matchesQuery(r, q) && matchesFilters(r, filters, ctx))
+    .sort(sorter(sortBy, ctx, index));
   const keyOf = grouper(groupBy, ctx);
   if (!keyOf) return [{ key: "all", label: "", items: list }];
   const groups = new Map();
