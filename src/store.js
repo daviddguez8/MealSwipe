@@ -305,3 +305,19 @@ export function createStore() {
 }
 
 export { diffPatch };
+
+// ---------------------------------------------------------------------------
+// Per-device view preferences (Recipes tab group by / sort). These stay in this
+// browser only and are never synced to the household.
+const VIEW_KEY = "mealswipe.view";
+export function loadViewPrefs() {
+  try {
+    const raw = lsGet(VIEW_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) {
+    return null;
+  }
+}
+export function saveViewPrefs(prefs) {
+  lsSet(VIEW_KEY, JSON.stringify(prefs));
+}

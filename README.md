@@ -10,7 +10,7 @@ The web version is shared: everyone with the household passcode sees the same we
 ## Where things live
 | File | What it does |
 | --- | --- |
-| `src/recipes.js` | Starter deck: 12 recipes with ingredients, steps and descriptions. Add one by copying a block and giving it a new `id`. |
+| `src/recipes.js` | Starter deck: 14 recipes with ingredients, steps and descriptions. Add one by copying a block and giving it a new `id`. |
 | `src/MealSwipe.jsx` | The app: swipe deck, recipe detail view, week plan, grocery list, recipe editor, settings. |
 | `src/lib.js` | Units (US/metric), scaling, grocery aggregation, JSON import. No React. |
 | `src/store.js` | **All data reads and writes.** A local backend (browser storage) and a Supabase backend share one interface: `load`, `persist`, `subscribe`, `onStatus`, `signOut`. To move to another database, add a backend here. |
