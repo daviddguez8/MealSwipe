@@ -53,26 +53,41 @@ function SourceBadge({ recipe, onDark, short, className = "" }) {
   );
 }
 
-// 1-5 whole stars. Tapping the current rating again clears it.
+// 0.5-5 stars in half steps: the left half of a star gives a half star.
+// Tapping the current rating again clears it.
 function StarRating({ value, onChange, size = 26 }) {
   const [hover, setHover] = useState(0);
   const shown = hover || value || 0;
   return (
     <div className="inline-flex items-center" role="radiogroup" aria-label="Your rating" onMouseLeave={() => setHover(0)}>
-      {[1, 2, 3, 4, 5].map((n) => (
-        <button
-          key={n}
-          type="button"
-          role="radio"
-          aria-checked={value === n}
-          aria-label={`${n} star${n === 1 ? "" : "s"}`}
-          onMouseEnter={() => setHover(n)}
-          onClick={() => onChange(value === n ? 0 : n)}
-          className="p-0.5 rounded-md text-warn transition active:scale-90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
-        >
-          <Star size={size} strokeWidth={2} className={n <= shown ? "fill-current" : "text-muted/40"} />
-        </button>
-      ))}
+      {[1, 2, 3, 4, 5].map((n) => {
+        const fill = shown >= n ? 1 : shown >= n - 0.5 ? 0.5 : 0;
+        return (
+          <span key={n} className="relative inline-block p-0.5" style={{ width: size + 4, height: size + 4 }}>
+            <Star size={size} strokeWidth={2} className="absolute left-0.5 top-0.5 text-muted/40" />
+            {fill > 0 && (
+              <span className="absolute left-0.5 top-0.5 overflow-hidden text-warn" style={{ width: fill === 1 ? size : size / 2, height: size }}>
+                <Star size={size} strokeWidth={2} className="fill-current" />
+              </span>
+            )}
+            {[n - 0.5, n].map((v, i) => (
+              <button
+                key={v}
+                type="button"
+                role="radio"
+                aria-checked={value === v}
+                aria-label={`${v} star${v === 1 ? "" : "s"}`}
+                onMouseEnter={() => setHover(v)}
+                onFocus={() => setHover(v)}
+                onBlur={() => setHover(0)}
+                onClick={() => onChange(value === v ? 0 : v)}
+                className={`absolute top-0 h-full w-1/2 ${i ? "right-0" : "left-0"} rounded-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent`}
+              />
+            ))}
+          </span>
+        );
+      })}
+      <span className="ml-1.5 w-7 text-sm font-bold tabular-nums text-muted">{shown ? shown : ""}</span>
     </div>
   );
 }
@@ -393,7 +408,7 @@ function SwipeDeck({ deck, settings, onDecide, flyRef, onOpen, ratings = {} }) {
 
 // ---------------------------------------------------------------------------
 // Recipe detail sheet (opens when a card is tapped)
-function RecipeDetail({ recipe: mine, original, startOriginal, rating, onRate, settings, planMult, defaultMult, fromDeck, onClose, onAdd, onPass, onSetMult, onRemove, onEdit }) {
+function RecipeDetail({ recipe: mine, original, startOriginal, rating, onRate, onToggleHidden, settings, planMult, defaultMult, fromDeck, onClose, onAdd, onPass, onSetMult, onRemove, onEdit }) {
   // "See original": show the MealSwipe version of a recipe this household edited.
   const [viewOriginal, setViewOriginal] = useState(Boolean(startOriginal));
   const canSeeOriginal = mine.source === "custom" && original;
@@ -536,6 +551,9 @@ function RecipeDetail({ recipe: mine, original, startOriginal, rating, onRate, s
         <div className="shrink-0 border-t border-line bg-surface px-4 pt-3 flex items-center gap-2" style={{ paddingBottom: "max(12px, env(safe-area-inset-bottom, 0px))" }}>
           <Btn variant="ghost" onClick={() => onEdit(mine)} aria-label="Edit recipe">
             <Pencil size={15} /> Edit
+          </Btn>
+          <Btn variant="ghost" onClick={() => onToggleHidden(mine.id)} aria-label={mine.hidden ? "Unhide recipe" : "Hide recipe"}>
+            {mine.hidden ? <Eye size={15} /> : <EyeOff size={15} />} <span className="hidden min-[400px]:inline">{mine.hidden ? "Unhide" : "Hide"}</span>
           </Btn>
           <div className="ml-auto flex gap-2">
             {fromDeck && (
@@ -1219,10 +1237,12 @@ function WeekView({ onOpen, planList, settings, setSettings, summary, setMult, r
 }
 
 // ---------------------------------------------------------------------------
-function LibraryView({ onOpen, recipes, decisions, plan, onEdit, onDelete, onAdd, onJson, onRestore, missingStarters, onToggleWeek, settings }) {
+function LibraryView({ onOpen, recipes, decisions, plan, onEdit, onDelete, onAdd, onJson, onRestore, missingStarters, onToggleWeek, onToggleHidden, settings }) {
   const [q, setQ] = useState("");
   const [confirm, setConfirm] = useState(null);
-  const list = recipes.filter((r) => (r.title + " " + r.cuisine).toLowerCase().includes(q.toLowerCase()));
+  const [showHidden, setShowHidden] = useState(false);
+  const hiddenCount = recipes.filter((r) => r.hidden).length;
+  const list = recipes.filter((r) => Boolean(r.hidden) === showHidden && (r.title + " " + r.cuisine).toLowerCase().includes(q.toLowerCase()));
   return (
     <div className="mx-auto max-w-3xl space-y-4">
       <div className="flex flex-wrap items-center gap-2">
@@ -1245,7 +1265,16 @@ function LibraryView({ onOpen, recipes, decisions, plan, onEdit, onDelete, onAdd
           </Btn>
         </div>
       )}
-      <p className="text-xs text-muted">{recipes.length} recipes in your deck. Edit any of them, or delete the ones you don't want to see again.</p>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-xs text-muted">
+          {showHidden ? `${hiddenCount} hidden. They stay out of your deck until you unhide them.` : `${recipes.length - hiddenCount} recipes in your deck. Edit any of them, or hide the ones you don't want to see.`}
+        </p>
+        {(hiddenCount > 0 || showHidden) && (
+          <Btn variant="soft" onClick={() => setShowHidden((v) => !v)}>
+            {showHidden ? <><Eye size={14} /> Back to recipes</> : <><EyeOff size={14} /> Hidden ({hiddenCount})</>}
+          </Btn>
+        )}
+      </div>
       <ul className="grid gap-2.5 sm:grid-cols-2">
         {list.map((r) => {
           const inWeek = plan[r.id] != null;
@@ -1279,9 +1308,14 @@ function LibraryView({ onOpen, recipes, decisions, plan, onEdit, onDelete, onAdd
                     <Btn onClick={() => onEdit(r)} aria-label={`Edit ${r.title}`}>
                       <Pencil size={15} />
                     </Btn>
-                    <Btn onClick={() => setConfirm(r.id)} aria-label={`Delete ${r.title}`}>
-                      <Trash2 size={15} />
+                    <Btn onClick={() => onToggleHidden(r.id)} aria-label={`${r.hidden ? "Unhide" : "Hide"} ${r.title}`}>
+                      {r.hidden ? <Eye size={15} /> : <EyeOff size={15} />}
                     </Btn>
+                    {r.source === "own" && (
+                      <Btn onClick={() => setConfirm(r.id)} aria-label={`Delete ${r.title}`}>
+                        <Trash2 size={15} />
+                      </Btn>
+                    )}
                   </div>
                 )}
               </div>
@@ -1346,7 +1380,7 @@ function Planner({ initial, store, onSignOut }) {
   }, []);
 
   const byId = useMemo(() => Object.fromEntries(recipes.map((r) => [r.id, r])), [recipes]);
-  const deck = useMemo(() => recipes.filter((r) => !decisions[r.id]), [recipes, decisions]);
+  const deck = useMemo(() => recipes.filter((r) => !decisions[r.id] && !r.hidden), [recipes, decisions]);
   const planList = useMemo(
     () => Object.entries(plan).filter(([id]) => byId[id]).map(([id, mult]) => ({ recipe: byId[id], mult })),
     [plan, byId]
@@ -1454,7 +1488,9 @@ function Planner({ initial, store, onSignOut }) {
     setModal(null);
     showToast(modal?.data ? "Recipe saved" : `${r.title} is next in your deck`);
   };
+  // Only your own recipes can be deleted; MealSwipe recipes are hidden instead.
   const deleteRecipe = (id) =>
+    byId[id] && byId[id].source === "own" &&
     patch((s) => {
       const plan = { ...s.plan };
       const decisions = { ...s.decisions };
@@ -1471,6 +1507,14 @@ function Planner({ initial, store, onSignOut }) {
     patch((s) => ({ recipes: s.recipes.map((x) => (x.id === id ? { ...orig, source: "classic", ...(x.image ? { image: x.image } : {}) } : x)) }));
     setModal(null);
     showToast("Back to the MealSwipe original");
+  };
+  // Hide keeps the recipe (and its edits, rating and photo) but takes it out of
+  // the deck and the recipe list until it's unhidden.
+  const toggleHidden = (id) => {
+    const r = byId[id];
+    if (!r) return;
+    patch((s) => ({ recipes: s.recipes.map((x) => (x.id !== id ? x : x.hidden ? (({ hidden, ...rest }) => rest)(x) : { ...x, hidden: true })) }));
+    showToast(r.hidden ? `${r.title} is back` : `${r.title} hidden`);
   };
   const setRating = (id, stars) =>
     patch((s) => {
@@ -1671,6 +1715,7 @@ function Planner({ initial, store, onSignOut }) {
             onRestore={restoreStarters}
             missingStarters={missingStarters}
             onToggleWeek={toggleWeek}
+            onToggleHidden={toggleHidden}
             onOpen={(r) => setDetail({ id: r.id, fromDeck: false })}
           />
         )}
@@ -1684,6 +1729,7 @@ function Planner({ initial, store, onSignOut }) {
           startOriginal={detail.original}
           rating={ratings[detail.id]}
           onRate={setRating}
+          onToggleHidden={(id) => { toggleHidden(id); if (!byId[id].hidden) setDetail(null); }}
           settings={settings}
           planMult={plan[detail.id]}
           defaultMult={defaultMult(byId[detail.id])}
@@ -1755,8 +1801,10 @@ function Planner({ initial, store, onSignOut }) {
 
 // ---------------------------------------------------------------------------
 // Entry: picks the storage backend, asks for the household passcode when shared.
-function PasscodeGate({ onSubmit, error, busy }) {
+function PasscodeGate({ onSubmit, onCreate, error, busy }) {
   const [code, setCode] = useState("");
+  const [creating, setCreating] = useState(false);
+  if (creating && onCreate) return <CreateHousehold onCreate={onCreate} onBack={() => setCreating(false)} />;
   return (
     <div className="min-h-full bg-bg text-ink font-body flex items-center justify-center gutter py-10">
       <form
@@ -1795,6 +1843,72 @@ function PasscodeGate({ onSubmit, error, busy }) {
         <button type="submit" disabled={busy || !code.trim()} className="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-accent text-onaccent px-4 py-3 font-bold disabled:opacity-50">
           {busy ? <Loader2 size={18} className="animate-spin" /> : <KeyRound size={18} />} Open our week
         </button>
+        {onCreate && (
+          <p className="text-center text-sm text-muted">
+            New here?{" "}
+            <button type="button" onClick={() => setCreating(true)} className="font-bold text-accent">
+              Create a household
+            </button>
+          </p>
+        )}
+      </form>
+    </div>
+  );
+}
+
+// A new household gets its own recipes, ratings and week, starting from the MealSwipe deck.
+function CreateHousehold({ onCreate, onBack }) {
+  const [name, setName] = useState("");
+  const [code, setCode] = useState(() => suggestPasscode());
+  const [saved, setSaved] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const field = "w-full rounded-xl border border-line bg-bg px-3 py-3 text-base text-ink focus:outline-none focus:border-accent";
+  return (
+    <div className="min-h-full bg-bg text-ink font-body flex items-center justify-center gutter py-10">
+      <form
+        onSubmit={async (e) => {
+          e.preventDefault();
+          setBusy(true);
+          setError("");
+          try {
+            await onCreate(name, code);
+          } catch (err) {
+            setError(err.message);
+            setBusy(false);
+          }
+        }}
+        className="w-full max-w-sm space-y-5 rounded-3xl border border-line bg-surface p-6 shadow-card"
+      >
+        <div className="space-y-1">
+          <h1 className="font-display text-xl font-extrabold">Create a household</h1>
+          <p className="text-sm text-muted">It starts with the MealSwipe recipes and an empty week. Share the passcode with the people you plan dinners with.</p>
+        </div>
+        <label className="block space-y-1">
+          <span className="text-xs font-bold uppercase tracking-wide text-muted">Household name</span>
+          <input id="new-household-name" className={field} value={name} onChange={(e) => setName(e.target.value)} placeholder="Home" maxLength={60} autoFocus />
+        </label>
+        <label className="block space-y-1">
+          <span className="text-xs font-bold uppercase tracking-wide text-muted">Passcode</span>
+          <div className="flex gap-2">
+            <input id="new-household-code" className={field} value={code} onChange={(e) => setCode(e.target.value)} autoCapitalize="none" spellCheck={false} autoComplete="new-password" />
+            <Btn variant="soft" onClick={() => setCode(suggestPasscode())} aria-label="Suggest another passcode">
+              <Shuffle size={15} />
+            </Btn>
+          </div>
+          <span className="block text-xs text-muted">At least 8 characters. Anyone with it can open this household.</span>
+        </label>
+        <label className="flex items-start gap-2 text-sm">
+          <input id="new-household-saved" type="checkbox" checked={saved} onChange={(e) => setSaved(e.target.checked)} className="mt-0.5 h-4 w-4 accent-[rgb(var(--accent))]" />
+          <span>I saved the passcode somewhere safe. It can't be recovered.</span>
+        </label>
+        {error && <p className="text-sm font-semibold text-danger">{error}</p>}
+        <div className="flex gap-2">
+          <Btn onClick={onBack}>Back</Btn>
+          <button type="submit" disabled={busy || !saved || code.trim().length < 8} className="flex-1 inline-flex items-center justify-center gap-2 rounded-xl bg-accent text-onaccent px-4 py-3 font-bold disabled:opacity-50">
+            {busy ? <Loader2 size={18} className="animate-spin" /> : <Plus size={18} />} Create household
+          </button>
+        </div>
       </form>
     </div>
   );
@@ -1838,6 +1952,15 @@ export default function MealSwipe() {
       <PasscodeGate
         busy={phase === "signing-in"}
         error={error}
+        onCreate={
+          store.createHousehold &&
+          (async (name, code) => {
+            await store.createHousehold(name, code);
+            await store.signIn(code);
+            setError("");
+            setPhase("loading");
+          })
+        }
         onSubmit={async (code) => {
           setPhase("signing-in");
           setError("");

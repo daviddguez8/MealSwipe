@@ -12,3 +12,6 @@ with src as (
 )
 update public.platform_recipes set active = false
  where id not in (select id from src) and active;
+
+-- One-time: copy each household's old data into the new tables.
+select public._ms_copy_legacy(id) from public.households where split_at is null;

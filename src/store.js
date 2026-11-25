@@ -13,6 +13,7 @@
 //   store.onStatus(fn)    fn("saved" | "saving" | "offline" | "error", detail)
 //   store.signOut()
 //   store.changePasscode(current, next)   shared backends only
+//   store.createHousehold(name, passcode) shared backends only
 //   store.onSignedOut(fn)  fn(reason) when this device's passcode stops working
 //                          (someone changed it), so the app can ask for the new one
 // ============================================================================
@@ -49,18 +50,21 @@ function lsSet(k, v) {
 //   "own"      a recipe this household created
 //
 // Both backends save the same household "rows", mirroring the database tables:
-//   recipes  { id: { kind: "own" | "edit" | "hidden", data } }   household_recipes
+//   recipes  { id: { kind: "own" | "edit", data } }              household_recipes
+//   hidden   { id: true }                                         household_hidden
 //   photos   { id: image }                                        household_photos
-//   ratings  { id: 1..5 }                                         household_ratings
+//   ratings  { id: 0.5..5 in half steps }                         household_ratings
 //   decisions, plan, checked, order                               household_plans
 //   settings                                                      households.settings
 // MealSwipe originals ("platform") are not copied into the household: a
 // Classic recipe has no row at all, so improvements to the original show up.
+// Hidden recipes stay in state.recipes with `hidden: true` (out of the deck and
+// the main list, and can be unhidden). MealSwipe recipes can't be deleted.
 // ---------------------------------------------------------------------------
 
-const MAP_KEYS = ["recipes", "photos", "ratings", "decisions", "plan", "checked"];
+const MAP_KEYS = ["recipes", "hidden", "photos", "ratings", "decisions", "plan", "checked"];
 const WHOLE_KEYS = ["order", "settings"];
-const NON_DATA = ["id", "image", "source", "custom"];
+const NON_DATA = ["id", "image", "source", "custom", "hidden"];
 
 function recipeData(r) {
   const d = { ...r };
@@ -103,6 +107,7 @@ export function toRows(saved, platform) {
   if (saved.recipes && !Array.isArray(saved.recipes)) {
     return {
       recipes: saved.recipes || {},
+      hidden: saved.hidden && !Array.isArray(saved.hidden) ? saved.hidden : {},
       photos: saved.photos || {},
       ratings: saved.ratings || {},
       decisions: saved.decisions || {},
@@ -116,19 +121,18 @@ export function toRows(saved, platform) {
   // Older saves: one array with every recipe copied in. Unchanged MealSwipe
   // recipes become Classic, changed ones become edits.
   const byId = platformMap(platform);
-  const rows = { recipes: {}, photos: {}, ratings: { ...(saved.ratings || {}) } };
+  const rows = { recipes: {}, hidden: {}, photos: {}, ratings: { ...(saved.ratings || {}) } };
   for (const r of saved.recipes) {
     if (r.image) rows.photos[r.id] = r.image;
+    if (r.hidden) rows.hidden[r.id] = true;
     const orig = byId[r.id];
     const src = r.source || (r.custom || !orig ? "own" : sameRecipe(r, orig) ? "classic" : "custom");
     if (!orig || src === "own") rows.recipes[r.id] = { kind: "own", data: recipeData(r) };
     else if (src === "custom") rows.recipes[r.id] = { kind: "edit", data: recipeData(r) };
   }
-  // MealSwipe recipes the household had seen and deleted stay hidden.
-  // Backups list them under `hidden`; older saves under seenStarterIds.
+  // MealSwipe recipes deleted in older versions come back as hidden.
   const present = new Set(saved.recipes.map((r) => r.id));
-  const hidden = Array.isArray(saved.hidden) ? saved.hidden : (saved.seenStarterIds || []).filter((id) => !present.has(id));
-  for (const id of hidden) if (byId[id] && !present.has(id)) rows.recipes[id] = { kind: "hidden", data: null };
+  for (const id of saved.seenStarterIds || []) if (byId[id] && !present.has(id)) rows.hidden[id] = true;
   rows.decisions = saved.decisions || {};
   rows.plan = saved.plan || {};
   rows.checked = saved.checked || {};
@@ -139,11 +143,10 @@ export function toRows(saved, platform) {
 
 // Household rows -> app state. New MealSwipe recipes (not in the saved order) go on top of the deck.
 export function stateFromSaved(saved, platform) {
-  const rows = toRows(saved, platform) || { recipes: {}, photos: {}, ratings: {}, decisions: {}, plan: {}, checked: {}, order: [], settings: {} };
+  const rows = toRows(saved, platform) || { recipes: {}, hidden: {}, photos: {}, ratings: {}, decisions: {}, plan: {}, checked: {}, order: [], settings: {} };
   const list = [];
   for (const p of platform) {
     const row = rows.recipes[p.id];
-    if (row && row.kind === "hidden") continue;
     if (row && row.kind === "edit" && row.data) list.push({ ...row.data, id: p.id, source: "custom" });
     else list.push({ ...p, source: "classic" });
   }
@@ -152,7 +155,10 @@ export function stateFromSaved(saved, platform) {
     if (!row || !row.data) continue;
     if (row.kind === "own" || (row.kind === "edit" && !pIds.has(id))) list.push({ ...row.data, id, source: "own" });
   }
-  for (const r of list) if (rows.photos[r.id]) r.image = rows.photos[r.id];
+  for (const r of list) {
+    if (rows.photos[r.id]) r.image = rows.photos[r.id];
+    if (rows.hidden[r.id]) r.hidden = true;
+  }
   const pos = new Map((rows.order || []).map((id, i) => [id, i]));
   const fresh = list.filter((r) => !pos.has(r.id));
   const known = list.filter((r) => pos.has(r.id)).sort((a, b) => pos.get(a.id) - pos.get(b.id));
@@ -169,16 +175,14 @@ export function stateFromSaved(saved, platform) {
 // App state -> household rows.
 export function rowsFromState(state, platform) {
   const byId = platformMap(platform);
-  const rows = { recipes: {}, photos: {}, ratings: {} };
-  const present = new Set();
+  const rows = { recipes: {}, hidden: {}, photos: {}, ratings: {} };
   for (const r of state.recipes) {
-    present.add(r.id);
     if (r.image) rows.photos[r.id] = r.image;
+    if (r.hidden) rows.hidden[r.id] = true;
     if (byId[r.id]) {
       if (r.source === "custom" || r.source === "own") rows.recipes[r.id] = { kind: "edit", data: recipeData(r) };
     } else rows.recipes[r.id] = { kind: "own", data: recipeData(r) };
   }
-  for (const id of Object.keys(byId)) if (!present.has(id)) rows.recipes[id] = { kind: "hidden", data: null };
   for (const [id, n] of Object.entries(state.ratings || {})) if (n) rows.ratings[id] = n;
   rows.decisions = state.decisions || {};
   rows.plan = state.plan || {};
@@ -401,6 +405,13 @@ function createSupabaseStore({ url, key, createClient }) {
     needsPasscode: true,
     hasPasscode: () => Boolean(code),
     platform: () => platform,
+    // Start a new household; sign in with signIn(code) afterwards.
+    async createHousehold(name, newCode) {
+      const { data, error } = await client.rpc("ms_create_household", { name: String(name || "").trim(), new_code: String(newCode || "").trim() });
+      if (error) throw new Error(error.message || "Couldn't reach the server.");
+      if (data && data.error) throw new Error(data.error);
+      return data;
+    },
     async signIn(newCode) {
       const prev = code;
       code = String(newCode || "").trim();

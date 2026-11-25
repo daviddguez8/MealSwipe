@@ -4,11 +4,13 @@
 -- MealSwipe recipes ("Classic") live once in `platform_recipes`.
 --
 --   platform_recipes   the MealSwipe deck every household starts from
---   household_recipes  per household: 'own' recipes, 'edit' (edited copy of a
---                      platform recipe), 'hidden' (platform recipe deleted)
+--   household_recipes  per household: 'own' recipes and 'edit' (edited copy
+--                      of a platform recipe)
+--   household_hidden   per household recipes hidden from the deck and list
+--                      (MealSwipe recipes can be hidden, never deleted)
 --   household_photos   per household photo for any recipe (kept apart so a
 --                      photo doesn't turn a Classic recipe into an edit)
---   household_ratings  per household 1-5 stars for any recipe
+--   household_ratings  per household 0.5-5 stars (half steps) for any recipe
 --   household_plans    per household week: swipe decisions, plan, checkmarks,
 --                      deck order
 --   households         passcode, name, settings, realtime channel, version
@@ -34,12 +36,18 @@ create table if not exists public.platform_recipes (
 create table if not exists public.household_recipes (
   household_id uuid not null references public.households(id) on delete cascade,
   recipe_id text not null,
-  kind text not null check (kind in ('own', 'edit', 'hidden')),
-  data jsonb,                     -- full recipe object (without id/image) for own/edit
+  kind text not null check (kind in ('own', 'edit')),
+  data jsonb not null,            -- full recipe object (without id/image)
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
-  primary key (household_id, recipe_id),
-  check ((kind = 'hidden') = (data is null))
+  primary key (household_id, recipe_id)
+);
+
+create table if not exists public.household_hidden (
+  household_id uuid not null references public.households(id) on delete cascade,
+  recipe_id text not null,
+  hidden_at timestamptz not null default now(),
+  primary key (household_id, recipe_id)
 );
 
 create table if not exists public.household_photos (
@@ -53,7 +61,7 @@ create table if not exists public.household_photos (
 create table if not exists public.household_ratings (
   household_id uuid not null references public.households(id) on delete cascade,
   recipe_id text not null,
-  stars smallint not null check (stars between 1 and 5),
+  stars numeric(2,1) not null check (stars between 0.5 and 5 and stars * 2 = floor(stars * 2)),
   updated_at timestamptz not null default now(),
   primary key (household_id, recipe_id)
 );
@@ -68,11 +76,13 @@ create table if not exists public.household_plans (
 );
 
 alter table public.households add column if not exists data_version bigint not null default 1;
+alter table public.households add column if not exists created_at timestamptz not null default now();
 alter table public.households add column if not exists split_at timestamptz;          -- first save through the new tables
 alter table public.households add column if not exists legacy_version bigint;         -- old `version` last copied over
 
 alter table public.platform_recipes enable row level security;
 alter table public.household_recipes enable row level security;
+alter table public.household_hidden enable row level security;
 alter table public.household_photos enable row level security;
 alter table public.household_ratings enable row level security;
 alter table public.household_plans enable row level security;
@@ -80,8 +90,8 @@ alter table public.household_plans enable row level security;
 -- ---------------------------------------------------------------------------
 -- Copy one household's old jsonb columns into the new tables (replacing what
 -- is there). Recipes equal to the platform version become Classic (no row);
--- changed ones become 'edit'; custom ones 'own'; starter ids the household
--- had seen but deleted become 'hidden'.
+-- changed ones become 'edit'; custom ones 'own'; MealSwipe recipes the
+-- household had deleted become hidden (they can't be deleted any more).
 create or replace function public._ms_copy_legacy(hid uuid)
 returns void
 language plpgsql
@@ -94,6 +104,7 @@ begin
   if h.id is null then return; end if;
 
   delete from household_recipes where household_id = hid;
+  delete from household_hidden where household_id = hid;
   delete from household_photos where household_id = hid;
 
   insert into household_photos (household_id, recipe_id, image)
@@ -111,8 +122,8 @@ begin
       or (r->>'custom')::boolean is true
       or (r - 'id' - 'image' - 'custom' - 'photoCredit') <> p.data;
 
-  insert into household_recipes (household_id, recipe_id, kind, data)
-  select hid, s.id, 'hidden', null
+  insert into household_hidden (household_id, recipe_id)
+  select hid, s.id
     from jsonb_array_elements_text(coalesce(h.seen_starter_ids, '[]'::jsonb)) s(id)
     join platform_recipes p on p.id = s.id
    where not exists (select 1 from jsonb_array_elements(coalesce(h.recipes, '[]'::jsonb)) r where r->>'id' = s.id)
@@ -171,6 +182,7 @@ begin
                             from platform_recipes p where p.active), '[]'),
     'recipes', coalesce((select jsonb_object_agg(r.recipe_id, jsonb_build_object('kind', r.kind, 'data', r.data))
                            from household_recipes r where r.household_id = h.id), '{}'),
+    'hidden', coalesce((select jsonb_object_agg(x.recipe_id, true) from household_hidden x where x.household_id = h.id), '{}'),
     'photos', coalesce((select jsonb_object_agg(f.recipe_id, f.image) from household_photos f where f.household_id = h.id), '{}'),
     'ratings', coalesce((select jsonb_object_agg(x.recipe_id, x.stars) from household_ratings x where x.household_id = h.id), '{}'),
     'decisions', coalesce(pl.decisions, '{}'),
@@ -184,7 +196,7 @@ end $$;
 -- ---------------------------------------------------------------------------
 -- patch keys (all optional):
 --   recipes  { id: {kind, data} | null }     photos  { id: dataUrl | null }
---   ratings  { id: 1..5 | null }
+--   ratings  { id: 0.5..5 | null }           hidden  { id: true | null }
 --   decisions / plan / checked  { key: value | null }, or null to clear all
 --   order    [ids]                            settings  { ... } (merged)
 create or replace function public.ms_household_save(code text, patch jsonb)
@@ -211,7 +223,7 @@ begin
         delete from household_recipes where household_id = h.id and recipe_id = e.key;
       else
         insert into household_recipes (household_id, recipe_id, kind, data)
-        values (h.id, e.key, e.value->>'kind', case when e.value->>'kind' = 'hidden' then null else e.value->'data' end)
+        values (h.id, e.key, e.value->>'kind', e.value->'data')
         on conflict (household_id, recipe_id) do update
           set kind = excluded.kind, data = excluded.data, updated_at = now();
       end if;
@@ -231,11 +243,21 @@ begin
 
   if patch ? 'ratings' then
     for e in select * from jsonb_each(patch->'ratings') loop
-      if jsonb_typeof(e.value) = 'number' and (e.value)::text::numeric between 1 and 5 then
-        insert into household_ratings (household_id, recipe_id, stars) values (h.id, e.key, round((e.value)::text::numeric))
+      if jsonb_typeof(e.value) = 'number' and (e.value)::text::numeric between 0.5 and 5 then
+        insert into household_ratings (household_id, recipe_id, stars) values (h.id, e.key, round((e.value)::text::numeric * 2) / 2)
         on conflict (household_id, recipe_id) do update set stars = excluded.stars, updated_at = now();
       else
         delete from household_ratings where household_id = h.id and recipe_id = e.key;
+      end if;
+    end loop;
+  end if;
+
+  if patch ? 'hidden' then
+    for e in select * from jsonb_each(patch->'hidden') loop
+      if e.value = 'true'::jsonb then
+        insert into household_hidden (household_id, recipe_id) values (h.id, e.key) on conflict do nothing;
+      else
+        delete from household_hidden where household_id = h.id and recipe_id = e.key;
       end if;
     end loop;
   end if;
@@ -319,7 +341,38 @@ begin
   return jsonb_build_object('version', h.version);
 end $$;
 
+-- ---------------------------------------------------------------------------
+-- Start a new household from the passcode screen. Throttled so the open
+-- endpoint can't be used to fill the database.
+create or replace function public.ms_create_household(name text, new_code text)
+returns jsonb
+language plpgsql
+security definer
+set search_path to 'public', 'extensions'
+as $$
+declare nc text := btrim(coalesce(new_code, ''));
+  nm text := left(btrim(coalesce(name, '')), 60);
+  hid uuid;
+begin
+  if (select count(*) from households where created_at > now() - interval '1 hour') >= 10 then
+    return jsonb_build_object('error', 'Too many new households right now. Try again in an hour.');
+  end if;
+  if length(nc) < 8 then
+    return jsonb_build_object('error', 'The passcode needs at least 8 characters.');
+  end if;
+  if exists (select 1 from households where passcode_hash = crypt(nc, passcode_hash)) then
+    return jsonb_build_object('error', 'Pick a different passcode.');
+  end if;
+  insert into households (name, passcode_hash, settings, split_at)
+  values (case when nm = '' then 'Home' else nm end, crypt(nc, gen_salt('bf')), '{}'::jsonb, now())
+  returning id into hid;
+  insert into household_plans (household_id) values (hid);
+  return jsonb_build_object('ok', true, 'householdId', hid);
+end $$;
+
 revoke all on function public._ms_copy_legacy(uuid) from public, anon, authenticated;
+revoke all on function public.ms_create_household(text, text) from public;
+grant execute on function public.ms_create_household(text, text) to anon, authenticated;
 revoke all on function public.ms_check(text) from public;
 revoke all on function public.ms_household_load(text) from public;
 revoke all on function public.ms_household_save(text, jsonb) from public;
