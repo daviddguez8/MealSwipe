@@ -8,7 +8,14 @@
 //   ctx.ratingOf(recipe) -> number 1..5, or null when unrated
 //   ctx.statusOf(recipe) -> "week" | "deck" | "passed"
 // Ratings come from the household's data; until they exist every recipe is unrated.
+//
+// Filters: { ingredients: [key], cuisine: [key], time: [key], ... }
+//   Inside one category a recipe matches any chosen value; across categories it
+//   must match all. Ingredients are the exception: a recipe must have every
+//   chosen ingredient ("avocado" + "chicken" = recipes with both).
 // ============================================================================
+
+import { normName, isStaple } from "./lib.js";
 
 export const GROUP_OPTIONS = [
   { value: "none", label: "No grouping" },
@@ -176,9 +183,81 @@ export function matchesQuery(r, q) {
   return s.split(/\s+/).every((w) => hay.includes(w));
 }
 
-export function organizeRecipes(recipes, { q = "", groupBy = "none", sortBy = "recent", ctx = {} } = {}) {
+// --- Filters ----------------------------------------------------------------------
+// Ingredient key/label: drop package sizes like "(14.5 oz)" and lightly singularize.
+function ingredientLabel(name) {
+  return String(name || "").replace(/\s*\([^)]*\)/g, "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+export function ingredientKey(name) {
+  return normName(ingredientLabel(name));
+}
+
+// Categories offered in the Filter panel, in display order (ingredients is separate).
+export const FILTER_CATEGORIES = [
+  { value: "cuisine", label: "Cuisine" },
+  { value: "protein", label: "Main protein" },
+  { value: "time", label: "Total time" },
+  { value: "rating", label: "Rating" },
+  { value: "status", label: "Status" },
+  { value: "source", label: "Source" },
+];
+
+export function emptyFilters() {
+  return { ingredients: [], cuisine: [], protein: [], time: [], rating: [], status: [], source: [] };
+}
+
+export function activeFilterCount(f) {
+  return Object.values(f || {}).reduce((n, v) => n + (Array.isArray(v) ? v.length : 0), 0);
+}
+
+// Every option with how many recipes have it, for building the Filter panel.
+export function filterOptions(recipes, ctx = {}) {
+  const out = {};
+  for (const c of FILTER_CATEGORIES) {
+    const keyOf = grouper(c.value, ctx);
+    const m = new Map();
+    for (const r of recipes) {
+      const g = keyOf(r);
+      if (!m.has(g.key)) m.set(g.key, { key: g.key, label: g.label, order: g.order, count: 0 });
+      m.get(g.key).count++;
+    }
+    out[c.value] = [...m.values()].sort((a, b) => a.order - b.order || a.label.localeCompare(b.label));
+  }
+  // Ingredients: skip pantry staples (salt, oil...), most common first.
+  const ing = new Map();
+  for (const r of recipes) {
+    const seen = new Set();
+    for (const g of r.ingredients || []) {
+      if (isStaple(g)) continue;
+      const key = ingredientKey(g.name);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      if (!ing.has(key)) ing.set(key, { key, label: ingredientLabel(g.name), count: 0 });
+      ing.get(key).count++;
+    }
+  }
+  out.ingredients = [...ing.values()].sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+  return out;
+}
+
+export function matchesFilters(r, filters, ctx = {}) {
+  if (!filters) return true;
+  const want = filters.ingredients || [];
+  if (want.length) {
+    const have = new Set((r.ingredients || []).map((g) => ingredientKey(g.name)));
+    if (!want.every((k) => have.has(k))) return false;
+  }
+  for (const c of FILTER_CATEGORIES) {
+    const sel = filters[c.value];
+    if (!sel || !sel.length) continue;
+    if (!sel.includes(grouper(c.value, ctx)(r).key)) return false;
+  }
+  return true;
+}
+
+export function organizeRecipes(recipes, { q = "", groupBy = "none", sortBy = "recent", filters = null, ctx = {} } = {}) {
   const index = new Map(recipes.map((r, i) => [r.id, i]));
-  const list = recipes.filter((r) => matchesQuery(r, q)).sort(sorter(sortBy, ctx, index));
+  const list = recipes.filter((r) => matchesQuery(r, q) && matchesFilters(r, filters, ctx)).sort(sorter(sortBy, ctx, index));
   const keyOf = grouper(groupBy, ctx);
   if (!keyOf) return [{ key: "all", label: "", items: list }];
   const groups = new Map();
