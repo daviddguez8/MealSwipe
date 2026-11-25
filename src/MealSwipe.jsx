@@ -2,7 +2,7 @@ import React, { useState, useMemo, useEffect, useRef, useCallback } from "react"
 import {
   X, Heart, Clock, Users, Plus, Minus, Trash2, Pencil, Settings, ListChecks, Layers, BookOpen,
   Copy, Check, Undo2, Shuffle, RotateCcw, Upload, Download, ChevronDown, ChevronUp, Search,
-  CalendarDays, ShoppingBasket, Info, Eye, EyeOff, ImagePlus, Camera, ChefHat, Maximize2, Cloud, CloudOff, LogOut, KeyRound, Loader2,
+  CalendarDays, ShoppingBasket, ArrowUpDown, LayoutList, Star, Info, Eye, EyeOff, ImagePlus, Camera, ChefHat, Maximize2, Cloud, CloudOff, LogOut, KeyRound, Loader2,
 } from "lucide-react";
 import { STARTER_RECIPES } from "./recipes.js";
 import { PHOTOS } from "./photos.js";
@@ -13,7 +13,8 @@ import {
 } from "./lib.js";
 
 // All saving and loading lives in store.js (local browser storage or a shared Supabase household).
-import { createStore } from "./store.js";
+import { createStore, loadViewPrefs, saveViewPrefs } from "./store.js";
+import { GROUP_OPTIONS, SORT_OPTIONS, organizeRecipes, cleanView, sourceOf } from "./organize.js";
 
 // Photo for a recipe: your own upload/link wins, then the starter photo.
 function photoOf(recipe) {
@@ -1145,16 +1146,47 @@ function WeekView({ onOpen, planList, settings, setSettings, summary, setMult, r
 }
 
 // ---------------------------------------------------------------------------
-function LibraryView({ onOpen, recipes, decisions, plan, onEdit, onDelete, onAdd, onJson, onRestore, missingStarters, onToggleWeek, settings }) {
+// Small labelled dropdown used for Group by / Sort by.
+function ViewSelect({ id, icon: Icon, label, value, options, onChange }) {
+  return (
+    <label htmlFor={id} className="relative inline-flex items-center gap-1.5 rounded-xl border border-line bg-surface pl-3 pr-8 py-2 text-sm text-ink focus-within:border-accent">
+      <Icon size={15} className="text-muted shrink-0" />
+      <span className="text-muted whitespace-nowrap">{label}</span>
+      <select id={id} value={value} onChange={(e) => onChange(e.target.value)} className="appearance-none bg-transparent font-semibold focus:outline-none cursor-pointer">
+        {options.map((o) => (
+          <option key={o.value} value={o.value}>{o.label}</option>
+        ))}
+      </select>
+      <ChevronDown size={14} className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-muted" />
+    </label>
+  );
+}
+
+// ratingOf(recipe) -> 1..5 or null. Wired to household ratings once they exist.
+function LibraryView({ onOpen, recipes, decisions, plan, onEdit, onDelete, onAdd, onJson, onRestore, missingStarters, onToggleWeek, settings, ratingOf }) {
   const [q, setQ] = useState("");
   const [confirm, setConfirm] = useState(null);
-  const list = recipes.filter((r) => (r.title + " " + r.cuisine).toLowerCase().includes(q.toLowerCase()));
+  const [view, setViewState] = useState(() => cleanView(loadViewPrefs()));
+  const [collapsed, setCollapsed] = useState({});
+  const setView = (p) =>
+    setViewState((v) => {
+      const next = { ...v, ...p };
+      saveViewPrefs(next);
+      return next;
+    });
+  const statusOf = useCallback((r) => (plan[r.id] != null ? "week" : decisions[r.id] === "pass" ? "passed" : "deck"), [plan, decisions]);
+  const groups = useMemo(
+    () => organizeRecipes(recipes, { q, groupBy: view.groupBy, sortBy: view.sortBy, ctx: { ratingOf, statusOf } }),
+    [recipes, q, view, ratingOf, statusOf]
+  );
+  const shown = groups.reduce((n, g) => n + g.items.length, 0);
+  const grouped = view.groupBy !== "none";
   return (
     <div className="mx-auto max-w-3xl space-y-4">
       <div className="flex flex-wrap items-center gap-2">
         <div className="relative flex-1 min-w-[12rem]">
           <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted" />
-          <input id="lib-search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search recipes or cuisines" className="w-full rounded-xl border border-line bg-surface pl-9 pr-3 py-2.5 text-sm text-ink focus:outline-none focus:border-accent" />
+          <input id="lib-search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search recipes, cuisines or ingredients" className="w-full rounded-xl border border-line bg-surface pl-9 pr-3 py-2.5 text-sm text-ink focus:outline-none focus:border-accent" />
         </div>
         <Btn variant="primary" onClick={onAdd}>
           <Plus size={16} /> Add recipe
@@ -1171,9 +1203,45 @@ function LibraryView({ onOpen, recipes, decisions, plan, onEdit, onDelete, onAdd
           </Btn>
         </div>
       )}
-      <p className="text-xs text-muted">{recipes.length} recipes in your deck. Edit any of them, or delete the ones you don't want to see again.</p>
+      <div className="flex flex-wrap items-center gap-2">
+        <ViewSelect id="lib-group" icon={LayoutList} label="Group by" value={view.groupBy} options={GROUP_OPTIONS} onChange={(groupBy) => { setView({ groupBy }); setCollapsed({}); }} />
+        <ViewSelect id="lib-sort" icon={ArrowUpDown} label="Sort" value={view.sortBy} options={SORT_OPTIONS} onChange={(sortBy) => setView({ sortBy })} />
+        {grouped && groups.length > 1 && (
+          <button
+            type="button"
+            className="text-xs font-semibold text-muted hover:text-ink px-1"
+            onClick={() => {
+              const allClosed = groups.every((g) => collapsed[g.key]);
+              setCollapsed(allClosed ? {} : Object.fromEntries(groups.map((g) => [g.key, true])));
+            }}
+          >
+            {groups.every((g) => collapsed[g.key]) ? "Expand all" : "Collapse all"}
+          </button>
+        )}
+      </div>
+      <p className="text-xs text-muted">
+        {q.trim() ? `${shown} of ${recipes.length} recipes match. ` : `${recipes.length} recipes in your deck. `}
+        Edit any of them, or delete the ones you don't want to see again.
+      </p>
+      {shown === 0 && q.trim() && <p className="rounded-2xl bg-chip px-4 py-6 text-center text-sm text-muted">No recipes match "{q.trim()}".</p>}
+      {groups.map((g) => (
+      <section key={g.key} className="space-y-2.5">
+        {grouped && (
+          <button
+            type="button"
+            onClick={() => setCollapsed((c) => ({ ...c, [g.key]: !c[g.key] }))}
+            aria-expanded={!collapsed[g.key]}
+            className="flex w-full items-center gap-2 pt-2 text-left"
+          >
+            {collapsed[g.key] ? <ChevronDown size={16} className="text-muted -rotate-90" /> : <ChevronDown size={16} className="text-muted" />}
+            <h3 className="font-bold">{g.label}</h3>
+            <span className="rounded-full bg-chip px-2 py-0.5 text-[11px] font-bold text-muted">{g.items.length}</span>
+            <span className="h-px flex-1 bg-line" />
+          </button>
+        )}
+      {!(grouped && collapsed[g.key]) && (
       <ul className="grid gap-2.5 sm:grid-cols-2">
-        {list.map((r) => {
+        {g.items.map((r) => {
           const inWeek = plan[r.id] != null;
           const state = inWeek ? "In this week" : decisions[r.id] === "pass" ? "Passed" : "In deck";
           return (
@@ -1185,12 +1253,17 @@ function LibraryView({ onOpen, recipes, decisions, plan, onEdit, onDelete, onAdd
                   <div className="text-xs text-muted">
                     {r.cuisine} · {r.prepMin + r.cookMin} min · serves {r.servings} · {r.ingredients.length} ingredients
                   </div>
+                  {ratingOf && ratingOf(r) != null && (
+                    <div className="mt-0.5 inline-flex items-center gap-1 text-xs font-semibold text-accent" aria-label={`Rated ${ratingOf(r)} out of 5`}>
+                      <Star size={12} className="fill-current" /> {ratingOf(r)}
+                    </div>
+                  )}
                 </div>
               </div>
               <div className="flex items-center justify-between gap-2">
                 <span className={`rounded-full px-2.5 py-0.5 text-[11px] font-bold ${inWeek ? "bg-good/15 text-good" : "bg-chip text-muted"}`}>
                   {state}
-                  {r.custom ? " · yours" : ""}
+                  {sourceOf(r).key !== "classic" ? ` · ${sourceOf(r).short}` : ""}
                 </span>
                 {confirm === r.id ? (
                   <div className="flex items-center gap-1">
@@ -1215,6 +1288,9 @@ function LibraryView({ onOpen, recipes, decisions, plan, onEdit, onDelete, onAdd
           );
         })}
       </ul>
+      )}
+      </section>
+      ))}
       <details className="rounded-2xl bg-chip/60 px-4 py-3 text-xs text-muted">
         <summary className="cursor-pointer font-bold">Photo credits</summary>
         <ul className="mt-2 space-y-1">
@@ -1244,6 +1320,9 @@ function Planner({ initial, store, onSignOut }) {
   const [detail, setDetail] = useState(null); // { id, fromDeck }
   const flyRef = useRef(null);
   const pendingMult = useRef(null);
+  // Household ratings ({ [recipeId]: 1..5 }); empty until ratings are stored.
+  const ratings = state.ratings;
+  const ratingOf = useCallback((r) => (ratings && ratings[r.id] != null ? ratings[r.id] : null), [ratings]);
 
   useEffect(() => {
     store.onStatus((status, detail) => {
@@ -1577,6 +1656,7 @@ function Planner({ initial, store, onSignOut }) {
             onRestore={restoreStarters}
             missingStarters={missingStarters}
             onToggleWeek={toggleWeek}
+            ratingOf={ratingOf}
             onOpen={(r) => setDetail({ id: r.id, fromDeck: false })}
           />
         )}
