@@ -5,7 +5,9 @@
 //
 //   store.mode            "local" | "supabase"
 //   store.needsPasscode   true for shared backends
-//   store.load()          -> saved state object, or null for a fresh start
+//   store.platform()      -> the MealSwipe recipes (originals) this household sees
+//   store.load()          -> saved household rows, or null for a fresh start
+//                            (turn them into app state with stateFromSaved)
 //   store.persist(state)  called on every change; the store decides how/when to save
 //   store.subscribe(fn)   fn(savedState) when someone else changes the data
 //   store.onStatus(fn)    fn("saved" | "saving" | "offline" | "error", detail)
@@ -14,6 +16,8 @@
 //   store.onSignedOut(fn)  fn(reason) when this device's passcode stops working
 //                          (someone changed it), so the app can ask for the new one
 // ============================================================================
+
+import { STARTER_RECIPES } from "./recipes.js";
 
 const LOCAL_KEY = "mealswipe.v1";
 const CODE_KEY = "mealswipe.passcode";
@@ -35,39 +39,179 @@ function lsSet(k, v) {
   }
 }
 
-const SYNCED_KEYS = ["recipes", "decisions", "plan", "checked", "settings", "seenStarterIds"];
-const MAP_KEYS = ["decisions", "plan", "checked"];
+// ---------------------------------------------------------------------------
+// Data model
+//
+// The app works with one `state`: { recipes: [...], ratings, decisions, plan,
+// checked, settings }. Each recipe carries `source`:
+//   "classic"  a MealSwipe recipe, unchanged
+//   "custom"   a MealSwipe recipe this household edited
+//   "own"      a recipe this household created
+//
+// Both backends save the same household "rows", mirroring the database tables:
+//   recipes  { id: { kind: "own" | "edit" | "hidden", data } }   household_recipes
+//   photos   { id: image }                                        household_photos
+//   ratings  { id: 1..5 }                                         household_ratings
+//   decisions, plan, checked, order                               household_plans
+//   settings                                                      households.settings
+// MealSwipe originals ("platform") are not copied into the household: a
+// Classic recipe has no row at all, so improvements to the original show up.
+// ---------------------------------------------------------------------------
 
-function pick(state) {
-  const o = {};
-  for (const k of SYNCED_KEYS) o[k] = state[k];
-  return o;
+const MAP_KEYS = ["recipes", "photos", "ratings", "decisions", "plan", "checked"];
+const WHOLE_KEYS = ["order", "settings"];
+const NON_DATA = ["id", "image", "source", "custom"];
+
+function recipeData(r) {
+  const d = { ...r };
+  for (const k of NON_DATA) delete d[k];
+  return d;
+}
+
+// Key order and number formatting don't count as an edit.
+function canon(v) {
+  if (Array.isArray(v)) return v.map(canon);
+  if (v && typeof v === "object") {
+    const o = {};
+    for (const k of Object.keys(v).sort()) if (v[k] !== undefined && v[k] !== "" && k !== "photoCredit") o[k] = canon(v[k]);
+    return o;
+  }
+  if (typeof v === "string" && v.trim() !== "" && !isNaN(Number(v))) return Number(v);
+  return v;
+}
+export function sameRecipe(a, b) {
+  return JSON.stringify(canon(recipeData(a))) === JSON.stringify(canon(recipeData(b)));
+}
+
+// Give a recipe the right `source` for this household (after a form save or import).
+export function withSource(recipe, platformById) {
+  const r = { ...recipe };
+  delete r.custom;
+  const orig = platformById[r.id];
+  r.source = !orig ? "own" : sameRecipe(r, orig) ? "classic" : "custom";
+  return r;
+}
+
+export function platformMap(platform) {
+  return Object.fromEntries((platform || []).map((p) => [p.id, p]));
+}
+
+// Any saved shape (rows from either backend, an older recipes-array save, or a
+// JSON backup) -> household rows. Returns null for "nothing saved yet".
+export function toRows(saved, platform) {
+  if (!saved) return null;
+  if (saved.recipes && !Array.isArray(saved.recipes)) {
+    return {
+      recipes: saved.recipes || {},
+      photos: saved.photos || {},
+      ratings: saved.ratings || {},
+      decisions: saved.decisions || {},
+      plan: saved.plan || {},
+      checked: saved.checked || {},
+      order: saved.order || [],
+      settings: saved.settings || {},
+    };
+  }
+  if (!Array.isArray(saved.recipes)) return null;
+  // Older saves: one array with every recipe copied in. Unchanged MealSwipe
+  // recipes become Classic, changed ones become edits.
+  const byId = platformMap(platform);
+  const rows = { recipes: {}, photos: {}, ratings: { ...(saved.ratings || {}) } };
+  for (const r of saved.recipes) {
+    if (r.image) rows.photos[r.id] = r.image;
+    const orig = byId[r.id];
+    const src = r.source || (r.custom || !orig ? "own" : sameRecipe(r, orig) ? "classic" : "custom");
+    if (!orig || src === "own") rows.recipes[r.id] = { kind: "own", data: recipeData(r) };
+    else if (src === "custom") rows.recipes[r.id] = { kind: "edit", data: recipeData(r) };
+  }
+  // MealSwipe recipes the household had seen and deleted stay hidden.
+  // Backups list them under `hidden`; older saves under seenStarterIds.
+  const present = new Set(saved.recipes.map((r) => r.id));
+  const hidden = Array.isArray(saved.hidden) ? saved.hidden : (saved.seenStarterIds || []).filter((id) => !present.has(id));
+  for (const id of hidden) if (byId[id] && !present.has(id)) rows.recipes[id] = { kind: "hidden", data: null };
+  rows.decisions = saved.decisions || {};
+  rows.plan = saved.plan || {};
+  rows.checked = saved.checked || {};
+  rows.order = saved.recipes.map((r) => r.id);
+  rows.settings = saved.settings || {};
+  return rows;
+}
+
+// Household rows -> app state. New MealSwipe recipes (not in the saved order) go on top of the deck.
+export function stateFromSaved(saved, platform) {
+  const rows = toRows(saved, platform) || { recipes: {}, photos: {}, ratings: {}, decisions: {}, plan: {}, checked: {}, order: [], settings: {} };
+  const list = [];
+  for (const p of platform) {
+    const row = rows.recipes[p.id];
+    if (row && row.kind === "hidden") continue;
+    if (row && row.kind === "edit" && row.data) list.push({ ...row.data, id: p.id, source: "custom" });
+    else list.push({ ...p, source: "classic" });
+  }
+  const pIds = new Set(platform.map((p) => p.id));
+  for (const [id, row] of Object.entries(rows.recipes)) {
+    if (!row || !row.data) continue;
+    if (row.kind === "own" || (row.kind === "edit" && !pIds.has(id))) list.push({ ...row.data, id, source: "own" });
+  }
+  for (const r of list) if (rows.photos[r.id]) r.image = rows.photos[r.id];
+  const pos = new Map((rows.order || []).map((id, i) => [id, i]));
+  const fresh = list.filter((r) => !pos.has(r.id));
+  const known = list.filter((r) => pos.has(r.id)).sort((a, b) => pos.get(a.id) - pos.get(b.id));
+  return {
+    recipes: [...fresh, ...known],
+    ratings: rows.ratings || {},
+    decisions: rows.decisions || {},
+    plan: rows.plan || {},
+    checked: rows.checked || {},
+    settings: rows.settings || {},
+  };
+}
+
+// App state -> household rows.
+export function rowsFromState(state, platform) {
+  const byId = platformMap(platform);
+  const rows = { recipes: {}, photos: {}, ratings: {} };
+  const present = new Set();
+  for (const r of state.recipes) {
+    present.add(r.id);
+    if (r.image) rows.photos[r.id] = r.image;
+    if (byId[r.id]) {
+      if (r.source === "custom" || r.source === "own") rows.recipes[r.id] = { kind: "edit", data: recipeData(r) };
+    } else rows.recipes[r.id] = { kind: "own", data: recipeData(r) };
+  }
+  for (const id of Object.keys(byId)) if (!present.has(id)) rows.recipes[id] = { kind: "hidden", data: null };
+  for (const [id, n] of Object.entries(state.ratings || {})) if (n) rows.ratings[id] = n;
+  rows.decisions = state.decisions || {};
+  rows.plan = state.plan || {};
+  rows.checked = state.checked || {};
+  rows.order = state.recipes.map((r) => r.id);
+  rows.settings = state.settings || {};
+  return rows;
 }
 
 // ---------------------------------------------------------------------------
+const LOCAL_KEY_V2 = "mealswipe.v2";
+
 function createLocalStore() {
   let statusFn = () => {};
+  const platform = STARTER_RECIPES;
+  const read = () => {
+    try {
+      const raw = lsGet(LOCAL_KEY_V2) || lsGet(LOCAL_KEY); // v1 is left in place as a backup
+      return raw ? JSON.parse(raw) : null;
+    } catch (e) {
+      return null;
+    }
+  };
   return {
     mode: "local",
     needsPasscode: false,
+    platform: () => platform,
     async load() {
-      try {
-        const raw = lsGet(LOCAL_KEY);
-        return raw ? JSON.parse(raw) : null;
-      } catch (e) {
-        return null;
-      }
+      return read();
     },
-    loadSync() {
-      try {
-        const raw = lsGet(LOCAL_KEY);
-        return raw ? JSON.parse(raw) : null;
-      } catch (e) {
-        return null;
-      }
-    },
+    loadSync: read,
     persist(state) {
-      const r = lsSet(LOCAL_KEY, JSON.stringify({ ...pick(state), savedAt: Date.now() }));
+      const r = lsSet(LOCAL_KEY_V2, JSON.stringify({ ...rowsFromState(state, platform), savedAt: Date.now() }));
       statusFn(r === true ? "saved" : r === "quota" ? "error" : "offline", r === "quota" ? "Browser storage is full. Try smaller photos or remove a few." : "");
     },
     subscribe() {
@@ -83,28 +227,51 @@ function createLocalStore() {
 
 // ---------------------------------------------------------------------------
 // Shared household backed by Supabase. The browser never touches tables
-// directly: two database functions check the passcode on every call.
+// directly: database functions check the passcode on every call.
+//   ms_check(code)                 is this passcode valid
+//   ms_household_load(code)        everything for the household + MealSwipe recipes
+//   ms_household_save(code, patch) row-level changes (see diffPatch)
+//   ms_change_passcode(code, new)
+// Compare with sorted keys: the database hands objects back in its own key order.
+function same(a, b) {
+  return stable(a) === stable(b);
+}
+function stable(v) {
+  if (Array.isArray(v)) return "[" + v.map(stable).join(",") + "]";
+  if (v && typeof v === "object") return "{" + Object.keys(v).sort().filter((k) => v[k] !== undefined).map((k) => JSON.stringify(k) + ":" + stable(v[k])).join(",") + "}";
+  return JSON.stringify(v === undefined ? null : v);
+}
+
 function diffPatch(next, base) {
   const patch = {};
   for (const k of MAP_KEYS) {
     const a = next[k] || {};
     const b = (base && base[k]) || {};
     const d = {};
-    for (const key of Object.keys(a)) if (JSON.stringify(a[key]) !== JSON.stringify(b[key])) d[key] = a[key];
+    for (const key of Object.keys(a)) if (!same(a[key], b[key])) d[key] = a[key];
     for (const key of Object.keys(b)) if (!(key in a)) d[key] = null;
     if (Object.keys(d).length) patch[k] = d;
   }
-  if (!base || JSON.stringify(next.recipes) !== JSON.stringify(base.recipes)) patch.recipes = next.recipes;
-  if (!base || JSON.stringify(next.settings) !== JSON.stringify(base.settings)) patch.settings = next.settings;
-  if (!base || JSON.stringify(next.seenStarterIds) !== JSON.stringify(base.seenStarterIds)) patch.seenStarterIds = next.seenStarterIds;
+  for (const k of WHOLE_KEYS) if (!base || !same(next[k], base[k])) patch[k] = next[k];
   return patch;
+}
+
+// The database copy of the MealSwipe recipes wins; recipes added to recipes.js
+// that aren't in the database yet still show up (run scripts/platform-sql.mjs
+// to copy them over, so edits and ratings of them work across devices too).
+function mergePlatform(fromDb) {
+  const list = Array.isArray(fromDb) ? fromDb.slice() : [];
+  const have = new Set(list.map((p) => p.id));
+  for (const r of STARTER_RECIPES) if (!have.has(r.id)) list.push(r);
+  return list;
 }
 
 function createSupabaseStore({ url, key, createClient }) {
   const client = createClient(url, key, { auth: { persistSession: false } });
   const clientId = Math.random().toString(36).slice(2);
   let code = lsGet(CODE_KEY) || "";
-  let base = null; // last state known to be saved on the server
+  let base = null; // last household rows known to be saved on the server
+  let platform = STARTER_RECIPES; // replaced by the database copy on load
   let latest = null;
   let timer = null;
   let inFlight = false;
@@ -156,10 +323,11 @@ function createSupabaseStore({ url, key, createClient }) {
   async function refresh() {
     if (pending() || !code) return;
     try {
-      const data = await rpc("ms_load", {});
+      const data = await rpc("ms_household_load", {});
       if (pending()) return;
       if (base && data.version === base.__version) return;
-      base = { ...pick(data), __version: data.version };
+      platform = mergePlatform(data.platform);
+      base = { ...toRows(data, platform), __version: data.version };
       listeners.forEach((fn) => fn(data));
       statusFn("saved");
     } catch (e) {
@@ -172,16 +340,17 @@ function createSupabaseStore({ url, key, createClient }) {
     timer = null;
     if (!latest) return;
     const snapshot = latest;
-    const patch = diffPatch(snapshot, base);
+    const rows = rowsFromState(snapshot, platform);
+    const patch = diffPatch(rows, base);
     if (!Object.keys(patch).length) return statusFn("saved");
     inFlight = true;
     statusFn("saving");
     try {
       const prevVersion = base ? base.__version : null;
-      const res = await rpc("ms_save", { patch });
+      const res = await rpc("ms_household_save", { patch });
       // If someone else saved in between, our copy is missing their change: re-read.
       const missedOthers = prevVersion == null || res.version !== prevVersion + 1;
-      base = { ...pick(snapshot), __version: missedOthers ? -1 : res.version };
+      base = { ...rows, __version: missedOthers ? -1 : res.version };
       inFlight = false;
       statusFn("saved");
       channel && channel.send({ type: "broadcast", event: "changed", payload: { by: clientId, version: res.version } });
@@ -231,11 +400,12 @@ function createSupabaseStore({ url, key, createClient }) {
     mode: "supabase",
     needsPasscode: true,
     hasPasscode: () => Boolean(code),
+    platform: () => platform,
     async signIn(newCode) {
       const prev = code;
       code = String(newCode || "").trim();
       try {
-        const data = await rpc("ms_load", {});
+        const data = await rpc("ms_check", {});
         lsSet(CODE_KEY, code);
         return data;
       } catch (e) {
@@ -244,17 +414,18 @@ function createSupabaseStore({ url, key, createClient }) {
       }
     },
     async load() {
-      const data = await rpc("ms_load", {});
-      base = data.recipes ? { ...pick(data), __version: data.version } : null;
+      const data = await rpc("ms_household_load", {});
+      platform = mergePlatform(data.platform);
+      base = data.isNew ? null : { ...toRows(data, platform), __version: data.version };
       connectRealtime(data.channel);
       clearInterval(pollTimer);
       pollTimer = setInterval(refresh, 30000);
       document.addEventListener("visibilitychange", onVisible);
-      return data.recipes ? data : null;
+      return data.isNew ? null : data;
     },
     persist(state) {
       latest = state;
-      if (!base || Object.keys(diffPatch(state, base)).length) schedule();
+      if (!base || Object.keys(diffPatch(rowsFromState(state, platform), base)).length) schedule();
     },
     subscribe(fn) {
       listeners.push(fn);

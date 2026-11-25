@@ -3,8 +3,8 @@ import {
   X, Heart, Clock, Users, Plus, Minus, Trash2, Pencil, Settings, ListChecks, Layers, BookOpen,
   Copy, Check, Undo2, Shuffle, RotateCcw, Upload, Download, ChevronDown, ChevronUp, Search,
   CalendarDays, ShoppingBasket, Info, Eye, EyeOff, ImagePlus, Camera, ChefHat, Maximize2, Cloud, CloudOff, LogOut, KeyRound, Loader2,
+  Star, BadgeCheck, UserRound,
 } from "lucide-react";
-import { STARTER_RECIPES } from "./recipes.js";
 import { PHOTOS } from "./photos.js";
 import {
   AISLES, UNIT_OPTIONS, formatIngredient, formatQty, formatDinners, isStaple, portionsOf, fitMultiplier,
@@ -13,7 +13,7 @@ import {
 } from "./lib.js";
 
 // All saving and loading lives in store.js (local browser storage or a shared Supabase household).
-import { createStore } from "./store.js";
+import { createStore, stateFromSaved, withSource, platformMap } from "./store.js";
 
 // Photo for a recipe: your own upload/link wins, then the starter photo.
 function photoOf(recipe) {
@@ -31,6 +31,58 @@ function Thumb({ recipe, className = "h-14 w-14 rounded-xl text-3xl" }) {
     <div className={`${className} shrink-0 flex items-center justify-center`} style={{ background: `linear-gradient(135deg, ${c1}, ${c2})` }} aria-hidden="true">
       {cardEmoji(recipe)}
     </div>
+  );
+}
+
+// Where a recipe comes from: MealSwipe's deck (as is, or edited by you) or your own.
+const SOURCE_LABELS = {
+  classic: { label: "MealSwipe Classic", short: "Classic", Icon: BadgeCheck },
+  custom: { label: "MealSwipe Custom", short: "Custom", Icon: Pencil },
+  own: { label: "Your Own", short: "Your Own", Icon: UserRound },
+};
+function sourceKey(recipe) {
+  return SOURCE_LABELS[recipe.source] ? recipe.source : recipe.custom ? "own" : "classic";
+}
+function SourceBadge({ recipe, onDark, short, className = "" }) {
+  const { label, short: s, Icon } = SOURCE_LABELS[sourceKey(recipe)];
+  const tone = onDark ? "bg-white/20 backdrop-blur text-white" : sourceKey(recipe) === "classic" ? "bg-chip text-muted" : "bg-accent/15 text-accent";
+  return (
+    <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-bold ${tone} ${className}`}>
+      <Icon size={12} strokeWidth={2.5} /> {short ? s : label}
+    </span>
+  );
+}
+
+// 1-5 whole stars. Tapping the current rating again clears it.
+function StarRating({ value, onChange, size = 26 }) {
+  const [hover, setHover] = useState(0);
+  const shown = hover || value || 0;
+  return (
+    <div className="inline-flex items-center" role="radiogroup" aria-label="Your rating" onMouseLeave={() => setHover(0)}>
+      {[1, 2, 3, 4, 5].map((n) => (
+        <button
+          key={n}
+          type="button"
+          role="radio"
+          aria-checked={value === n}
+          aria-label={`${n} star${n === 1 ? "" : "s"}`}
+          onMouseEnter={() => setHover(n)}
+          onClick={() => onChange(value === n ? 0 : n)}
+          className="p-0.5 rounded-md text-warn transition active:scale-90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+        >
+          <Star size={size} strokeWidth={2} className={n <= shown ? "fill-current" : "text-muted/40"} />
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function StarsSmall({ value, onDark }) {
+  if (!value) return null;
+  return (
+    <span className={`inline-flex items-center gap-0.5 text-xs font-bold ${onDark ? "text-white" : "text-warn"}`} aria-label={`Rated ${value} out of 5`}>
+      <Star size={12} className="fill-current" /> {value}
+    </span>
   );
 }
 
@@ -55,41 +107,11 @@ function fileToDataUrl(file, max = 900) {
 
 const DEFAULT_SETTINGS = { household: 2, target: 5, units: "us", portionMode: "asWritten", hideStaples: true };
 
-function freshState() {
-  return hydrate(null);
-}
-
-// Turn saved data (from any backend) into app state, adding new starter recipes.
-function hydrate(saved) {
-  if (!saved || !Array.isArray(saved.recipes)) {
-    return {
-      recipes: STARTER_RECIPES.map((r) => ({ ...r })),
-      seenStarterIds: STARTER_RECIPES.map((r) => r.id),
-      decisions: {},
-      plan: {},
-      checked: {},
-      settings: { ...DEFAULT_SETTINGS },
-    };
-  }
-  // New starter recipes added to the code later appear automatically;
-  // ones the user deleted stay deleted.
-  const seen = new Set(saved.seenStarterIds || []);
-  const fresh = STARTER_RECIPES.filter((r) => !seen.has(r.id) && !saved.recipes.some((x) => x.id === r.id));
-  // Fill in fields added to starter recipes after they were saved (steps, description).
-  const starterById = Object.fromEntries(STARTER_RECIPES.map((r) => [r.id, r]));
-  const upgraded = saved.recipes.map((r) => {
-    const st = starterById[r.id];
-    if (!st) return r;
-    return { ...r, steps: r.steps && r.steps.length ? r.steps : st.steps, description: r.description || st.description };
-  });
-  return {
-    recipes: [...fresh.map((r) => ({ ...r })), ...upgraded],
-    seenStarterIds: STARTER_RECIPES.map((r) => r.id).concat([...seen]).filter((v, i, a) => a.indexOf(v) === i),
-    decisions: saved.decisions || {},
-    plan: saved.plan || {},
-    checked: saved.checked || {},
-    settings: { ...DEFAULT_SETTINGS, ...(saved.settings || {}) },
-  };
+// Turn saved data (from any backend, or a JSON backup) into app state.
+// The MealSwipe originals come from the store; see store.js for the data model.
+function hydrate(saved, platform) {
+  const st = stateFromSaved(saved, platform);
+  return { ...st, settings: { ...DEFAULT_SETTINGS, ...st.settings } };
 }
 
 // ---------------------------------------------------------------------------
@@ -162,7 +184,7 @@ function Progress({ dinners, target }) {
 
 // ---------------------------------------------------------------------------
 // Swipe card
-function CardFace({ recipe, settings, expanded, onOpen }) {
+function CardFace({ recipe, settings, expanded, onOpen, rating }) {
   const [c1, c2] = cardColors(recipe);
   const photo = photoOf(recipe);
   const preview = recipe.ingredients.filter((i) => !isStaple(i)).slice(0, 4);
@@ -198,12 +220,15 @@ function CardFace({ recipe, settings, expanded, onOpen }) {
         <span className="absolute left-4 top-4 rounded-full bg-black/40 backdrop-blur px-3 py-1 text-xs font-bold uppercase tracking-wider text-white">
           {recipe.cuisine}
         </span>
-        {recipe.custom && (
-          <span className="absolute right-4 top-4 rounded-full bg-white/85 px-2.5 py-1 text-[11px] font-bold text-black/80">Yours</span>
+        {sourceKey(recipe) !== "classic" && (
+          <span className="absolute right-4 top-4 rounded-full bg-white/85 px-2.5 py-1 text-[11px] font-bold text-black/80">{SOURCE_LABELS[sourceKey(recipe)].short}</span>
         )}
       </div>
       <div className="flex-1 min-h-0 flex flex-col px-5 pt-4 pb-4 gap-3">
-        <h3 className="font-display text-[1.45rem] leading-tight font-extrabold text-balance">{recipe.title}</h3>
+        <div className="flex items-start justify-between gap-2">
+          <h3 className="font-display text-[1.45rem] leading-tight font-extrabold text-balance">{recipe.title}</h3>
+          {rating ? <span className="mt-1.5 shrink-0"><StarsSmall value={rating} /></span> : null}
+        </div>
         <div className="flex flex-wrap gap-2 text-xs font-semibold text-muted">
           <span className="inline-flex items-center gap-1 rounded-full bg-chip px-2.5 py-1">
             <Clock size={13} /> {recipe.prepMin} prep + {recipe.cookMin} cook
@@ -253,7 +278,7 @@ function CardFace({ recipe, settings, expanded, onOpen }) {
 
 const SWIPE_THRESHOLD = 100;
 
-function SwipeDeck({ deck, settings, onDecide, flyRef, onOpen }) {
+function SwipeDeck({ deck, settings, onDecide, flyRef, onOpen, ratings = {} }) {
   const top = deck[0];
   const next = deck[1];
   const [drag, setDrag] = useState({ x: 0, y: 0, active: false });
@@ -331,7 +356,7 @@ function SwipeDeck({ deck, settings, onDecide, flyRef, onOpen }) {
           style={{ transform: `translateY(${14 - progress * 14}px) scale(${0.94 + progress * 0.06})` }}
           aria-hidden="true"
         >
-          <CardFace recipe={next} settings={settings} expanded={false} />
+          <CardFace recipe={next} settings={settings} expanded={false} rating={ratings[next.id]} />
         </div>
       )}
       <div
@@ -347,7 +372,7 @@ function SwipeDeck({ deck, settings, onDecide, flyRef, onOpen }) {
         onPointerUp={onUp}
         onPointerCancel={onUp}
       >
-        <CardFace recipe={top} settings={settings} expanded={false} onOpen={() => onOpen(top)} />
+        <CardFace recipe={top} settings={settings} expanded={false} onOpen={() => onOpen(top)} rating={ratings[top.id]} />
         <div
           className="pointer-events-none absolute left-5 top-6 rotate-[-14deg] rounded-xl border-[3px] border-good px-3 py-1 font-display text-2xl font-black tracking-wider text-good bg-surface/80"
           style={{ opacity: like }}
@@ -368,7 +393,11 @@ function SwipeDeck({ deck, settings, onDecide, flyRef, onOpen }) {
 
 // ---------------------------------------------------------------------------
 // Recipe detail sheet (opens when a card is tapped)
-function RecipeDetail({ recipe, settings, planMult, defaultMult, fromDeck, onClose, onAdd, onPass, onSetMult, onRemove, onEdit }) {
+function RecipeDetail({ recipe: mine, original, startOriginal, rating, onRate, settings, planMult, defaultMult, fromDeck, onClose, onAdd, onPass, onSetMult, onRemove, onEdit }) {
+  // "See original": show the MealSwipe version of a recipe this household edited.
+  const [viewOriginal, setViewOriginal] = useState(Boolean(startOriginal));
+  const canSeeOriginal = mine.source === "custom" && original;
+  const recipe = viewOriginal && canSeeOriginal ? { ...original, source: "classic" } : mine;
   const inWeek = planMult != null;
   const [localMult, setLocalMult] = useState(inWeek ? planMult : defaultMult);
   const mult = inWeek ? planMult : localMult;
@@ -413,7 +442,10 @@ function RecipeDetail({ recipe, settings, planMult, defaultMult, fromDeck, onClo
               <X size={20} />
             </button>
             <div className="absolute inset-x-0 bottom-0 p-5 space-y-1.5">
-              <span className="inline-block rounded-full bg-white/20 backdrop-blur px-3 py-1 text-[11px] font-bold uppercase tracking-wider text-white">{recipe.cuisine}</span>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="inline-block rounded-full bg-white/20 backdrop-blur px-3 py-1 text-[11px] font-bold uppercase tracking-wider text-white">{recipe.cuisine}</span>
+                <SourceBadge recipe={recipe} onDark />
+              </div>
               <h2 className="font-display text-[1.7rem] sm:text-3xl leading-tight font-extrabold text-white text-balance">{recipe.title}</h2>
               {photo && photo.credit && photo.credit.author && (
                 <a href={photo.credit.source || undefined} target="_blank" rel="noopener noreferrer" className="block truncate text-[10px] text-white/75 hover:text-white">
@@ -424,7 +456,23 @@ function RecipeDetail({ recipe, settings, planMult, defaultMult, fromDeck, onClo
           </div>
 
           <div className="px-5 py-5 space-y-6">
+            {canSeeOriginal && (
+              <div className={`flex flex-wrap items-center justify-between gap-2 rounded-2xl px-4 py-3 text-sm ${viewOriginal ? "bg-accent/10" : "bg-chip"}`}>
+                <span className="min-w-0">{viewOriginal ? "You're looking at the MealSwipe original." : "You've edited this MealSwipe recipe."}</span>
+                <Btn variant="soft" onClick={() => setViewOriginal((v) => !v)}>
+                  <Eye size={14} /> {viewOriginal ? "Back to your version" : "See original"}
+                </Btn>
+              </div>
+            )}
             {recipe.description && <p className="text-[15px] leading-relaxed text-ink/85">{recipe.description}</p>}
+
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-line px-4 py-2.5">
+              <div className="min-w-0">
+                <div className="text-sm font-bold">{rating ? "Your household's rating" : "Rate this recipe"}</div>
+                <div className="text-xs text-muted">{rating ? "Tap the same star again to clear it." : "Saved for everyone in your household."}</div>
+              </div>
+              <StarRating value={rating || 0} onChange={(n) => onRate(mine.id, n)} />
+            </div>
 
             <div className="grid grid-cols-4 gap-2 text-center">
               {[["Prep", `${recipe.prepMin}m`], ["Cook", `${recipe.cookMin}m`], ["Total", `${(+recipe.prepMin || 0) + (+recipe.cookMin || 0)}m`], ["Serves", recipe.servings]].map(([k, v]) => (
@@ -486,7 +534,7 @@ function RecipeDetail({ recipe, settings, planMult, defaultMult, fromDeck, onClo
         </div>
 
         <div className="shrink-0 border-t border-line bg-surface px-4 pt-3 flex items-center gap-2" style={{ paddingBottom: "max(12px, env(safe-area-inset-bottom, 0px))" }}>
-          <Btn variant="ghost" onClick={() => onEdit(recipe)} aria-label="Edit recipe">
+          <Btn variant="ghost" onClick={() => onEdit(mine)} aria-label="Edit recipe">
             <Pencil size={15} /> Edit
           </Btn>
           <div className="ml-auto flex gap-2">
@@ -514,6 +562,31 @@ function RecipeDetail({ recipe, settings, planMult, defaultMult, fromDeck, onClo
 // ---------------------------------------------------------------------------
 // Recipe form
 const EMPTY_ING = { name: "", qty: "", unit: "", aisle: "Produce" };
+
+// Shown above the edit form for a MealSwipe recipe this household changed.
+function EditedBanner({ onSeeOriginal, onRevert }) {
+  const [confirm, setConfirm] = useState(false);
+  return (
+    <div className="mb-4 rounded-2xl bg-chip px-4 py-3 space-y-2">
+      <div className="flex flex-wrap items-center gap-2 text-sm">
+        <SourceBadge recipe={{ source: "custom" }} />
+        <span className="text-muted">Your edited copy of a MealSwipe recipe.</span>
+      </div>
+      {confirm ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-sm font-semibold">Drop your edits and go back to the original? Your rating, photo and week plan stay.</span>
+          <Btn variant="danger" onClick={onRevert}><RotateCcw size={14} /> Revert</Btn>
+          <Btn onClick={() => setConfirm(false)}>Keep my edits</Btn>
+        </div>
+      ) : (
+        <div className="flex flex-wrap gap-2">
+          <Btn variant="soft" onClick={onSeeOriginal}><Eye size={14} /> See original</Btn>
+          <Btn variant="soft" onClick={() => setConfirm(true)}><RotateCcw size={14} /> Revert to original</Btn>
+        </div>
+      )}
+    </div>
+  );
+}
 
 function RecipeForm({ initial, onSave, onCancel, cuisines }) {
   const [r, setR] = useState(() =>
@@ -692,7 +765,7 @@ const JSON_EXAMPLE = `[
   }
 ]`;
 
-function JsonModal({ recipes, fullState, onImport, onRestoreBackup, onClose }) {
+function JsonModal({ recipes, fullState, platform, onImport, onRestoreBackup, onClose }) {
   const [tab, setTab] = useState("import");
   const [text, setText] = useState("");
   const [msg, setMsg] = useState(null);
@@ -701,12 +774,13 @@ function JsonModal({ recipes, fullState, onImport, onRestoreBackup, onClose }) {
   const exportRef = useRef(null);
   const exportText = useMemo(() => {
     if (scope === "backup") {
-      const { decisions, plan, checked, settings, seenStarterIds } = fullState;
-      return JSON.stringify({ app: "MealSwipe", version: 1, backup: true, recipes, decisions, plan, checked, settings, seenStarterIds }, null, 2);
+      const { decisions, plan, checked, settings, ratings } = fullState;
+      const hidden = (platform || []).filter((p) => !recipes.some((r) => r.id === p.id)).map((p) => p.id);
+      return JSON.stringify({ app: "MealSwipe", version: 2, backup: true, recipes, ratings: ratings || {}, hidden, decisions, plan, checked, settings }, null, 2);
     }
-    const list = scope === "custom" ? recipes.filter((r) => r.custom) : recipes;
+    const list = scope === "custom" ? recipes.filter((r) => r.source === "own") : recipes;
     return JSON.stringify({ app: "MealSwipe", version: 1, recipes: list }, null, 2);
-  }, [recipes, scope, fullState]);
+  }, [recipes, scope, fullState, platform]);
 
   const run = (mode) => {
     try {
@@ -769,7 +843,7 @@ function JsonModal({ recipes, fullState, onImport, onRestoreBackup, onClose }) {
         <div className="space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="inline-flex rounded-xl bg-chip p-1 text-sm">
-              {[["all", `Recipes (${recipes.length})`], ["custom", `Only mine (${recipes.filter((r) => r.custom).length})`], ["backup", "Everything"]].map(([k, l]) => (
+              {[["all", `Recipes (${recipes.length})`], ["custom", `Only mine (${recipes.filter((r) => r.source === "own").length})`], ["backup", "Everything"]].map(([k, l]) => (
                 <button key={k} type="button" onClick={() => setScope(k)} className={`rounded-lg px-3 py-1 font-semibold ${scope === k ? "bg-surface text-ink shadow" : "text-muted"}`}>
                   {l}
                 </button>
@@ -1190,7 +1264,7 @@ function LibraryView({ onOpen, recipes, decisions, plan, onEdit, onDelete, onAdd
               <div className="flex items-center justify-between gap-2">
                 <span className={`rounded-full px-2.5 py-0.5 text-[11px] font-bold ${inWeek ? "bg-good/15 text-good" : "bg-chip text-muted"}`}>
                   {state}
-                  {r.custom ? " · yours" : ""}
+                  {r.source === "own" ? " · yours" : r.source === "custom" ? " · edited" : ""}
                 </span>
                 {confirm === r.id ? (
                   <div className="flex items-center gap-1">
@@ -1237,6 +1311,9 @@ function Planner({ initial, store, onSignOut }) {
   const [state, setState] = useState(initial);
   const [sync, setSync] = useState({ status: "saved", detail: "" });
   const { recipes, decisions, plan, checked, settings } = state;
+  const ratings = state.ratings || {};
+  const platform = store.platform();
+  const platformById = useMemo(() => platformMap(platform), [platform]);
   const [tab, setTab] = useState("swipe");
   const [modal, setModal] = useState(null); // {type: 'form'|'json'|'settings'|'copy', data}
   const [toast, setToast] = useState(null);
@@ -1251,7 +1328,7 @@ function Planner({ initial, store, onSignOut }) {
       if (status === "error" && detail) setToast(detail);
     });
     // Someone else in the household changed something: take their version.
-    return store.subscribe((saved) => setState(hydrate(saved)));
+    return store.subscribe((saved) => setState(hydrate(saved, store.platform())));
   }, [store]);
 
   useEffect(() => {
@@ -1277,7 +1354,7 @@ function Planner({ initial, store, onSignOut }) {
   const summary = useMemo(() => weekSummary(planList, settings.household, settings.target), [planList, settings.household, settings.target]);
   const cuisines = useMemo(() => [...new Set(recipes.map((r) => r.cuisine))].sort(), [recipes]);
   const passedCount = Object.values(decisions).filter((d) => d === "pass").length;
-  const missingStarters = STARTER_RECIPES.filter((s) => !byId[s.id]).length;
+  const missingStarters = platform.filter((s) => !byId[s.id]).length;
 
   const defaultMult = useCallback(
     (r) => (settings.portionMode === "fit" ? fitMultiplier(r, settings.household) : 1),
@@ -1368,7 +1445,8 @@ function Planner({ initial, store, onSignOut }) {
       ),
     }));
 
-  const saveRecipe = (r) => {
+  const saveRecipe = (raw) => {
+    const r = withSource(raw, platformById);
     patch((s) => {
       const exists = s.recipes.some((x) => x.id === r.id);
       return { recipes: exists ? s.recipes.map((x) => (x.id === r.id ? r : x)) : [r, ...s.recipes] };
@@ -1385,8 +1463,24 @@ function Planner({ initial, store, onSignOut }) {
       return { recipes: s.recipes.filter((r) => r.id !== id), plan, decisions };
     });
   const restoreStarters = () =>
-    patch((s) => ({ recipes: [...s.recipes, ...STARTER_RECIPES.filter((x) => !s.recipes.some((r) => r.id === x.id)).map((x) => ({ ...x }))] }));
-  const importRecipes = (list, mode) => {
+    patch((s) => ({ recipes: [...s.recipes, ...platform.filter((x) => !s.recipes.some((r) => r.id === x.id)).map((x) => ({ ...x, source: "classic" }))] }));
+  // Drop this household's edits to a MealSwipe recipe. Rating, photo and week plan stay.
+  const revertRecipe = (id) => {
+    const orig = platformById[id];
+    if (!orig) return;
+    patch((s) => ({ recipes: s.recipes.map((x) => (x.id === id ? { ...orig, source: "classic", ...(x.image ? { image: x.image } : {}) } : x)) }));
+    setModal(null);
+    showToast("Back to the MealSwipe original");
+  };
+  const setRating = (id, stars) =>
+    patch((s) => {
+      const next = { ...(s.ratings || {}) };
+      if (stars) next[id] = stars;
+      else delete next[id];
+      return { ratings: next };
+    });
+  const importRecipes = (incoming, mode) => {
+    const list = incoming.map((r) => withSource(r, platformById));
     if (mode === "replace") {
       patch(() => ({ recipes: list, decisions: {}, plan: {}, checked: {} }));
       return { added: list.length, updated: 0 };
@@ -1396,7 +1490,7 @@ function Planner({ initial, store, onSignOut }) {
     return res;
   };
   const resetAll = () => {
-    setState(freshState());
+    setState(hydrate(null, platform));
     setHistory([]);
     setTab("swipe");
   };
@@ -1484,7 +1578,7 @@ function Planner({ initial, store, onSignOut }) {
             )}
             <div className="relative w-full" style={{ height: "min(32rem, calc(100svh - 17rem))", minHeight: "26rem" }}>
               {deck.length > 0 ? (
-                <SwipeDeck deck={deck} settings={settings} onDecide={decide} flyRef={flyRef} onOpen={(r) => setDetail({ id: r.id, fromDeck: true })} />
+                <SwipeDeck deck={deck} settings={settings} ratings={ratings} onDecide={decide} flyRef={flyRef} onOpen={(r) => setDetail({ id: r.id, fromDeck: true })} />
               ) : (
                 <div className="h-full rounded-[28px] border-2 border-dashed border-line flex flex-col items-center justify-center text-center gap-3 p-6">
                   <div className="text-5xl" aria-hidden="true">🍽️</div>
@@ -1586,6 +1680,10 @@ function Planner({ initial, store, onSignOut }) {
         <RecipeDetail
           key={detail.id}
           recipe={byId[detail.id]}
+          original={platformById[detail.id]}
+          startOriginal={detail.original}
+          rating={ratings[detail.id]}
+          onRate={setRating}
           settings={settings}
           planMult={plan[detail.id]}
           defaultMult={defaultMult(byId[detail.id])}
@@ -1610,16 +1708,26 @@ function Planner({ initial, store, onSignOut }) {
       )}
       {modal?.type === "form" && (
         <Modal title={modal.data ? "Edit recipe" : "Add a recipe"} onClose={() => setModal(null)} wide>
-          <RecipeForm initial={modal.data} onSave={saveRecipe} onCancel={() => setModal(null)} cuisines={cuisines} />
+          {modal.data && modal.data.source === "custom" && platformById[modal.data.id] && (
+            <EditedBanner
+              onSeeOriginal={() => { const id = modal.data.id; setModal(null); setDetail({ id, fromDeck: false, original: true }); }}
+              onRevert={() => revertRecipe(modal.data.id)}
+            />
+          )}
+          {modal.data && modal.data.source !== "custom" && (
+            <div className="mb-4"><SourceBadge recipe={modal.data} /></div>
+          )}
+          <RecipeForm key={modal.data ? modal.data.id + (modal.data.source || "") : "new"} initial={modal.data} onSave={saveRecipe} onCancel={() => setModal(null)} cuisines={cuisines} />
         </Modal>
       )}
       {modal?.type === "json" && (
         <JsonModal
           recipes={recipes}
           fullState={state}
+          platform={platform}
           onImport={importRecipes}
           onRestoreBackup={(b) => {
-            setState(hydrate(b));
+            setState(hydrate(b, platform));
             setHistory([]);
           }}
           onClose={() => setModal(null)}
@@ -1695,7 +1803,7 @@ function PasscodeGate({ onSubmit, error, busy }) {
 export default function MealSwipe() {
   const store = useMemo(() => createStore(), []);
   const [phase, setPhase] = useState(() => (store.needsPasscode ? (store.hasPasscode() ? "loading" : "gate") : "ready"));
-  const [initial, setInitial] = useState(() => (store.needsPasscode ? null : hydrate(store.loadSync())));
+  const [initial, setInitial] = useState(() => (store.needsPasscode ? null : hydrate(store.loadSync(), store.platform())));
   const [error, setError] = useState("");
   const [session, setSession] = useState(0);
   const CHANGED_MSG = "The household passcode was changed. Enter the new one.";
@@ -1712,7 +1820,7 @@ export default function MealSwipe() {
   const open = useCallback(async () => {
     try {
       const saved = await store.load();
-      setInitial(hydrate(saved));
+      setInitial(hydrate(saved, store.platform()));
       setPhase("ready");
       setSession((n) => n + 1);
     } catch (e) {
