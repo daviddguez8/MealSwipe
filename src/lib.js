@@ -402,3 +402,94 @@ export function cardColors(recipe) {
 export function cardEmoji(recipe) {
   return recipe.emoji || CUISINE_EMOJI[String(recipe.cuisine || "").toLowerCase()] || "🍽️";
 }
+
+// ---------------------------------------------------------------------------
+// "Ask Claude" form helpers. The form keeps two kinds of marks:
+//   touched[key]        the person edited this field (Claude must not overwrite it)
+//   ai[key]             Claude filled this field (shown highlighted until edited)
+// Ingredient rows carry their own row._touched / row._ai objects keyed by
+// name | qty | unit | aisle. Keys starting with "_" are dropped on save.
+// Models offered in Settings. The server only accepts these ids (api/_recipe-ai.mjs).
+export const AI_MODELS = [
+  ["claude-opus-5-5", "Opus 5.5", "Best results, about 3 to 5¢ a fill"],
+  ["claude-sonnet-5-5", "Sonnet 5.5", "Faster, about 1 to 2¢ a fill"],
+  ["claude-haiku-5-5", "Haiku 5.5", "Fastest, a fraction of a cent"],
+];
+export const DEFAULT_AI_MODEL = "claude-opus-5-5";
+
+export const AI_FORM_KEYS = ["title", "emoji", "cuisine", "description", "prepMin", "cookMin", "servings", "stepsText"];
+
+const blank = (v) => v == null || String(v).trim() === "";
+
+// What to send to Claude: only what the person actually provided.
+export function draftForAi(form, touched) {
+  const d = { title: form.title, description: form.description, cuisine: form.cuisine, ingredients: [], steps: [] };
+  for (const k of ["prepMin", "cookMin", "servings"]) if (touched[k] && !blank(form[k])) d[k] = Number(form[k]);
+  for (const g of form.ingredients || []) {
+    if (blank(g.name)) continue;
+    const t = g._touched || {};
+    const row = { name: g.name.trim() };
+    if (!blank(g.qty)) row.qty = Number(g.qty);
+    if (t.unit || !blank(g.qty)) row.unit = g.unit;
+    if (t.aisle) row.aisle = g.aisle;
+    d.ingredients.push(row);
+  }
+  d.steps = String(form.stepsText || "").split(/\n+/).map((s) => s.trim()).filter(Boolean);
+  return d;
+}
+
+function sameIngredient(a, b) {
+  const x = normName(a), y = normName(b);
+  if (!x || !y) return false;
+  return x === y || x.includes(y) || y.includes(x);
+}
+
+// Merge Claude's recipe into the form without touching anything the person wrote.
+// Returns { form, ai } where ai marks the top-level fields Claude filled.
+export function mergeAiRecipe(form, touched, aiRecipe, prevAi = {}) {
+  const next = { ...form };
+  const ai = { ...prevAi };
+  const fill = (key, value, canFill) => {
+    if (!canFill || blank(value)) return;
+    next[key] = value;
+    ai[key] = true;
+  };
+  // A field Claude filled earlier (and nobody edited since) can be refreshed on a second ask.
+  const free = (key) => !touched[key] && (blank(form[key]) || ai[key]);
+  fill("title", aiRecipe.title, blank(form.title));
+  fill("emoji", aiRecipe.emoji, free("emoji"));
+  fill("cuisine", aiRecipe.cuisine, free("cuisine"));
+  fill("description", aiRecipe.description, free("description"));
+  for (const k of ["prepMin", "cookMin", "servings"]) fill(k, aiRecipe[k] != null ? String(aiRecipe[k]) : "", !touched[k]);
+  fill("stepsText", (aiRecipe.steps || []).join("\n"), free("stepsText"));
+
+  // Ingredients: keep the person's rows (and finish them), replace Claude's earlier
+  // untouched rows, drop empty rows, then add what's still missing.
+  const theirs = (form.ingredients || []).filter((g) => !blank(g.name) && !(g._ai && g._ai.name && !Object.keys(g._touched || {}).length));
+  const pool = [...(aiRecipe.ingredients || [])];
+  const rows = theirs.map((g) => {
+    const idx = pool.findIndex((p) => sameIngredient(p.name, g.name));
+    if (idx < 0) return g;
+    const p = pool.splice(idx, 1)[0];
+    const t = g._touched || {};
+    const row = { ...g, _ai: { ...(g._ai || {}) } };
+    if (blank(g.qty) && !t.qty) {
+      row.qty = String(p.qty);
+      row._ai.qty = true;
+      if (!t.unit) {
+        row.unit = p.unit;
+        row._ai.unit = true;
+      }
+    }
+    if (!t.aisle) {
+      row.aisle = p.aisle;
+      row._ai.aisle = true;
+    }
+    return row;
+  });
+  for (const p of pool) {
+    rows.push({ name: p.name, qty: String(p.qty), unit: p.unit, aisle: p.aisle, _ai: { name: true, qty: true, unit: true, aisle: true } });
+  }
+  next.ingredients = rows.length ? rows : form.ingredients;
+  return { form: next, ai };
+}

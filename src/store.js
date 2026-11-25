@@ -16,6 +16,8 @@
 //   store.createHousehold(name, passcode) shared backends only
 //   store.onSignedOut(fn)  fn(reason) when this device's passcode stops working
 //                          (someone changed it), so the app can ask for the new one
+//   store.askClaude(draft, units, model)  -> filled-in recipe from /api/ask-claude
+//                          (web app only; the local/Artifact store has no askClaude)
 // ============================================================================
 
 import { STARTER_RECIPES } from "./recipes.js";
@@ -472,6 +474,22 @@ function createSupabaseStore({ url, key, createClient }) {
       code = "";
       lsSet(CODE_KEY, null);
       stopSync();
+    },
+    // The server checks the passcode before calling Claude, so only the household can spend credits.
+    async askClaude(draft, units, model) {
+      let res;
+      try {
+        res = await fetch("/api/ask-claude", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ code, draft, units, model }),
+        });
+      } catch (e) {
+        throw new Error("Couldn't reach Claude. Check your connection.");
+      }
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data || !data.recipe) throw new Error((data && data.error) || `Ask Claude failed (${res.status}).`);
+      return data.recipe;
     },
   };
 }

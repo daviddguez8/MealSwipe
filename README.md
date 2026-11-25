@@ -14,7 +14,8 @@ The web version is shared: everyone with the household passcode sees the same we
 | `src/MealSwipe.jsx` | The app: swipe deck, recipe detail view, week plan, grocery list, recipe editor, settings. |
 | `src/lib.js` | Units (US/metric), scaling, grocery aggregation, JSON import. No React. |
 | `src/store.js` | **All data reads and writes.** A local backend (browser storage) and a Supabase backend share one interface: `load`, `persist`, `subscribe`, `onStatus`, `signOut`. To move to another database, add a backend here. |
-| `template.html` | Page shell and color tokens. |
+| `api/ask-claude.mjs` | Vercel function behind the recipe form's **Ask Claude** button. Holds the Anthropic API key; the browser never sees it. Prompt, schema and cleanup live in `api/_recipe-ai.mjs`. |
+| `template.html` | Page shell and color tokens (`--ai` is the gold used for Claude-filled fields). |
 | `build.mjs` | Builds both versions with esbuild and Tailwind. |
 
 ## Supabase
@@ -29,6 +30,15 @@ To add a household, run in the Supabase SQL editor:
 ```sql
 insert into households (name, passcode_hash) values ('Home', extensions.crypt('new-passcode', extensions.gen_salt('bf')));
 ```
+
+## Ask Claude
+In the web app, the Add/Edit recipe form has an **Ask Claude** button. Type a title (and optionally a description, ingredients or steps) and Claude fills in everything still empty: emoji, cuisine, times, servings, ingredients with quantities/units/aisles, and steps. It never overwrites what you typed. Every field Claude filled is tinted yellow-gold until you edit it. No photos are generated; the card uses the emoji.
+
+Setup (once): in Vercel → Project → Settings → Environment Variables add `ANTHROPIC_API_KEY` (from console.anthropic.com), then redeploy. Setting a monthly spend limit in the Anthropic console is a good safety net.
+
+- **Model:** Household & settings → Ask Claude model (Opus 5.5 default, Sonnet 5.5, Haiku 5.5). The choice is saved with the household. To add a model, add it to `AI_MODELS` in both `src/lib.js` and `api/_recipe-ai.mjs` (`npm test` checks they match).
+- **Who can use it:** the function checks the household passcode (via `ms_check`, or `ms_load` where that doesn't exist) before calling Claude, so only your household can spend credits.
+- **Tests:** `npm test` runs the function against a fake Supabase and a fake Anthropic API, plus the form's merge rules.
 
 ## Meal math
 A recipe at multiplier `m` makes `servings × m` portions, which covers `servings × m ÷ people` dinners. The header shows dinners covered out of the weekly target.
