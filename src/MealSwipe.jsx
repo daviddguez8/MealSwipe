@@ -238,9 +238,14 @@ function CardFace({ recipe, settings, expanded, onOpen, rating }) {
         <span className="absolute left-4 top-4 rounded-full bg-black/40 backdrop-blur px-3 py-1 text-xs font-bold uppercase tracking-wider text-white">
           {recipe.cuisine}
         </span>
-        {sourceKey(recipe) !== "classic" && (
-          <span className="absolute right-4 top-4 rounded-full bg-white/85 px-2.5 py-1 text-[11px] font-bold text-black/80">{SOURCE_LABELS[sourceKey(recipe)].short}</span>
-        )}
+        {(() => {
+          const { label, Icon } = SOURCE_LABELS[sourceKey(recipe)];
+          return (
+            <span className="absolute right-4 top-4 max-w-[55%] inline-flex items-center gap-1 rounded-full bg-white/85 px-2.5 py-1 text-[11px] font-bold text-black/80">
+              <Icon size={12} strokeWidth={2.5} className="shrink-0" /> <span className="truncate">{label}</span>
+            </span>
+          );
+        })()}
       </div>
       <div className="flex-1 min-h-0 flex flex-col px-5 pt-4 pb-4 gap-3">
         <div className="flex items-start justify-between gap-2">
