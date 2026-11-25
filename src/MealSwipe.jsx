@@ -3,13 +3,14 @@ import {
   X, Heart, Clock, Users, Plus, Minus, Trash2, Pencil, Settings, ListChecks, Layers, BookOpen,
   Copy, Check, Undo2, Shuffle, RotateCcw, Upload, Download, ChevronDown, ChevronUp, Search,
   CalendarDays, ShoppingBasket, Info, Eye, EyeOff, ImagePlus, Camera, ChefHat, Maximize2, Cloud, CloudOff, LogOut, KeyRound, Loader2,
+  Sparkles,
 } from "lucide-react";
 import { STARTER_RECIPES } from "./recipes.js";
 import { PHOTOS } from "./photos.js";
 import {
   AISLES, UNIT_OPTIONS, formatIngredient, formatQty, formatDinners, isStaple, portionsOf, fitMultiplier,
   stepMult, weekSummary, buildGroceryList, groceryText, parseImport, mergeRecipes, cardColors, cardEmoji,
-  normalizeRecipe, slug,
+  normalizeRecipe, slug, AI_MODELS, DEFAULT_AI_MODEL, AI_FORM_KEYS, draftForAi, mergeAiRecipe,
 } from "./lib.js";
 
 // All saving and loading lives in store.js (local browser storage or a shared Supabase household).
@@ -53,7 +54,7 @@ function fileToDataUrl(file, max = 900) {
   });
 }
 
-const DEFAULT_SETTINGS = { household: 2, target: 5, units: "us", portionMode: "asWritten", hideStaples: true };
+const DEFAULT_SETTINGS = { household: 2, target: 5, units: "us", portionMode: "asWritten", hideStaples: true, aiModel: DEFAULT_AI_MODEL };
 
 function freshState() {
   return hydrate(null);
@@ -514,13 +515,27 @@ function RecipeDetail({ recipe, settings, planMult, defaultMult, fromDeck, onClo
 // ---------------------------------------------------------------------------
 // Recipe form
 const EMPTY_ING = { name: "", qty: "", unit: "", aisle: "Produce" };
+const stripMarks = (g) => {
+  const { _ai, _touched, ...rest } = g;
+  return rest;
+};
 
-function RecipeForm({ initial, onSave, onCancel, cuisines }) {
+function RecipeForm({ initial, onSave, onCancel, cuisines, askClaude }) {
   const [r, setR] = useState(() =>
     initial
-      ? { ...initial, stepsText: (initial.steps || []).join("\n"), ingredients: initial.ingredients.map((i) => ({ ...i, qty: String(i.qty) })) }
+      ? {
+          ...initial,
+          stepsText: (initial.steps || []).join("\n"),
+          ingredients: initial.ingredients.map((i) => ({ ...i, qty: String(i.qty), _touched: { name: true, qty: true, unit: true, aisle: true } })),
+        }
       : { title: "", cuisine: "", emoji: "", image: "", description: "", stepsText: "", prepMin: 15, cookMin: 20, servings: 4, ingredients: [{ ...EMPTY_ING }, { ...EMPTY_ING }, { ...EMPTY_ING }] }
   );
+  // touched: fields the person edited (Claude leaves them alone). ai: fields Claude filled (gold until edited).
+  const [touched, setTouched] = useState(() => (initial ? Object.fromEntries(AI_FORM_KEYS.map((k) => [k, true])) : {}));
+  const [ai, setAi] = useState({});
+  const [asking, setAsking] = useState(false);
+  const latest = useRef(null);
+  latest.current = { r, touched, ai };
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const onFile = async (e) => {
@@ -537,8 +552,42 @@ function RecipeForm({ initial, onSave, onCancel, cuisines }) {
   };
   const starterPhoto = initial && !initial.image && PHOTOS[initial.id];
   const shown = r.image || (starterPhoto && starterPhoto.src);
-  const set = (k, v) => setR((p) => ({ ...p, [k]: v }));
-  const setIng = (i, k, v) => setR((p) => ({ ...p, ingredients: p.ingredients.map((g, j) => (j === i ? { ...g, [k]: v } : g)) }));
+  const set = (k, v) => {
+    setR((p) => ({ ...p, [k]: v }));
+    setTouched((t) => (t[k] ? t : { ...t, [k]: true }));
+    setAi((a) => (a[k] ? { ...a, [k]: false } : a));
+  };
+  const setIng = (i, k, v) =>
+    setR((p) => ({
+      ...p,
+      ingredients: p.ingredients.map((g, j) =>
+        j === i ? { ...g, [k]: v, _touched: { ...(g._touched || {}), [k]: true }, _ai: g._ai && g._ai[k] ? { ...g._ai, [k]: false } : g._ai } : g
+      ),
+    }));
+
+  const aiCount = Object.values(ai).filter(Boolean).length + r.ingredients.reduce((n, g) => n + (g._ai ? Object.values(g._ai).filter(Boolean).length : 0), 0);
+  const canAsk = Boolean(r.title.trim() || (r.description || "").trim());
+
+  const ask = async () => {
+    if (!askClaude || asking) return;
+    if (!canAsk) {
+      setError("Type a recipe name (or a short description) first, then Ask Claude.");
+      return;
+    }
+    setError("");
+    setAsking(true);
+    try {
+      const filled = await askClaude(draftForAi(r, touched));
+      // Merge against the latest form, in case the person kept typing while Claude worked.
+      const cur = latest.current;
+      const merged = mergeAiRecipe(cur.r, cur.touched, filled, cur.ai);
+      setR(merged.form);
+      setAi(merged.ai);
+    } catch (err) {
+      setError(err.message);
+    }
+    setAsking(false);
+  };
 
   const submit = (e) => {
     e.preventDefault();
@@ -547,7 +596,7 @@ function RecipeForm({ initial, onSave, onCancel, cuisines }) {
         ...r,
         id: initial ? initial.id : `c-${slug(r.title)}-${Date.now().toString(36)}`,
         custom: initial ? initial.custom : true,
-        ingredients: r.ingredients.filter((g) => g.name.trim()).map((g) => ({ ...g, aisle: g.aisle })),
+        ingredients: r.ingredients.filter((g) => g.name.trim()).map(stripMarks),
         steps: r.stepsText || "",
       });
       if (initial && !initial.custom) delete clean.custom;
@@ -558,20 +607,55 @@ function RecipeForm({ initial, onSave, onCancel, cuisines }) {
   };
 
   const field = "w-full rounded-xl border border-line bg-bg px-3 py-2 text-sm text-ink placeholder:text-muted/70 focus:outline-none focus:border-accent";
+  // Claude-filled inputs are tinted yellow-gold until the person edits them.
+  const aiField = "w-full rounded-xl border border-ai bg-ai/15 ring-1 ring-ai/40 px-3 py-2 text-sm text-ink placeholder:text-muted/70 focus:outline-none focus:border-accent";
+  const f = (on) => (on ? aiField : field);
   const label = "text-xs font-bold uppercase tracking-wide text-muted";
+  const ingAi = (g, k) => Boolean(g._ai && g._ai[k]);
 
   return (
     <form onSubmit={submit} className="space-y-4">
       <div className="grid grid-cols-[1fr_4.5rem] gap-3">
         <label className="space-y-1">
           <span className={label}>Title</span>
-          <input id="rf-title" className={field} value={r.title} onChange={(e) => set("title", e.target.value)} placeholder="Pozole Rojo" required />
+          <input id="rf-title" className={f(ai.title)} value={r.title} onChange={(e) => set("title", e.target.value)} placeholder="Pozole Rojo" required />
         </label>
         <label className="space-y-1">
           <span className={label}>Emoji</span>
-          <input id="rf-emoji" className={field + " text-center"} value={r.emoji} onChange={(e) => set("emoji", e.target.value)} placeholder="🍲" maxLength={4} />
+          <input id="rf-emoji" className={f(ai.emoji) + " text-center"} value={r.emoji} onChange={(e) => set("emoji", e.target.value)} placeholder="🍲" maxLength={4} />
         </label>
       </div>
+      <label className="block space-y-1">
+        <span className={label}>Description</span>
+        <textarea
+          id="rf-desc"
+          rows={3}
+          className={f(ai.description)}
+          value={r.description || ""}
+          onChange={(e) => set("description", e.target.value)}
+          placeholder="What makes this one good, or what you want: “my mom's spicy version with dried guajillo, ready in 40 minutes”"
+        />
+      </label>
+      {askClaude && (
+        <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-ai/50 bg-ai/10 p-3">
+          <button
+            id="rf-ask-claude"
+            type="button"
+            onClick={ask}
+            disabled={asking}
+            className="inline-flex items-center gap-1.5 rounded-xl bg-ai px-4 py-2.5 text-sm font-bold text-onai hover:brightness-105 active:scale-[.97] disabled:opacity-70"
+          >
+            {asking ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />} {asking ? "Asking Claude…" : "Ask Claude"}
+          </button>
+          <p className="min-w-0 flex-1 text-xs text-muted">
+            {asking
+              ? "Writing the ingredients and steps. This takes a few seconds."
+              : aiCount
+                ? `Claude filled ${aiCount} field${aiCount === 1 ? "" : "s"}, shown in gold. Check them; editing a field clears its highlight.`
+                : "Claude reads the title, description and anything else you've typed, and fills in the rest. It won't change what you wrote."}
+          </p>
+        </div>
+      )}
       <div className="space-y-1">
         <span className={label}>Photo</span>
         <div className="flex gap-3 items-start">
@@ -603,7 +687,7 @@ function RecipeForm({ initial, onSave, onCancel, cuisines }) {
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <label className="space-y-1 col-span-2 sm:col-span-1">
           <span className={label}>Cuisine</span>
-          <input id="rf-cuisine" list="rf-cuisines" className={field} value={r.cuisine} onChange={(e) => set("cuisine", e.target.value)} placeholder="Mexican" />
+          <input id="rf-cuisine" list="rf-cuisines" className={f(ai.cuisine)} value={r.cuisine} onChange={(e) => set("cuisine", e.target.value)} placeholder="Mexican" />
           <datalist id="rf-cuisines">
             {cuisines.map((c) => (
               <option key={c} value={c} />
@@ -612,15 +696,15 @@ function RecipeForm({ initial, onSave, onCancel, cuisines }) {
         </label>
         <label className="space-y-1">
           <span className={label}>Prep min</span>
-          <input id="rf-prep" type="number" min="0" inputMode="numeric" className={field} value={r.prepMin} onChange={(e) => set("prepMin", e.target.value)} />
+          <input id="rf-prep" type="number" min="0" inputMode="numeric" className={f(ai.prepMin)} value={r.prepMin} onChange={(e) => set("prepMin", e.target.value)} />
         </label>
         <label className="space-y-1">
           <span className={label}>Cook min</span>
-          <input id="rf-cook" type="number" min="0" inputMode="numeric" className={field} value={r.cookMin} onChange={(e) => set("cookMin", e.target.value)} />
+          <input id="rf-cook" type="number" min="0" inputMode="numeric" className={f(ai.cookMin)} value={r.cookMin} onChange={(e) => set("cookMin", e.target.value)} />
         </label>
         <label className="space-y-1 col-span-2 sm:col-span-1">
           <span className={label}>Servings</span>
-          <input id="rf-servings" type="number" min="1" inputMode="numeric" className={field} value={r.servings} onChange={(e) => set("servings", e.target.value)} />
+          <input id="rf-servings" type="number" min="1" inputMode="numeric" className={f(ai.servings)} value={r.servings} onChange={(e) => set("servings", e.target.value)} />
         </label>
       </div>
 
@@ -631,20 +715,20 @@ function RecipeForm({ initial, onSave, onCancel, cuisines }) {
         </div>
         {r.ingredients.map((g, i) => (
           <div key={i} className="grid grid-cols-[1fr_auto] gap-2 rounded-2xl bg-chip/60 p-2">
-            <input id={`rf-ing-name-${i}`} aria-label="Ingredient name" className={field} value={g.name} onChange={(e) => setIng(i, "name", e.target.value)} placeholder="Ingredient (e.g. yellow onion)" />
+            <input id={`rf-ing-name-${i}`} aria-label="Ingredient name" className={f(ingAi(g, "name"))} value={g.name} onChange={(e) => setIng(i, "name", e.target.value)} placeholder="Ingredient (e.g. yellow onion)" />
             <button type="button" aria-label="Remove ingredient" onClick={() => setR((p) => ({ ...p, ingredients: p.ingredients.filter((_, j) => j !== i) }))} className="px-2 text-muted hover:text-danger">
               <Trash2 size={16} />
             </button>
             <div className="col-span-2 grid grid-cols-[4.5rem_5.5rem_1fr] gap-2">
-              <input id={`rf-ing-qty-${i}`} aria-label="Quantity" type="number" step="any" min="0" inputMode="decimal" className={field} value={g.qty} onChange={(e) => setIng(i, "qty", e.target.value)} placeholder="Qty" />
-              <select id={`rf-ing-unit-${i}`} aria-label="Unit" className={field + " px-2"} value={g.unit} onChange={(e) => setIng(i, "unit", e.target.value)}>
+              <input id={`rf-ing-qty-${i}`} aria-label="Quantity" type="number" step="any" min="0" inputMode="decimal" className={f(ingAi(g, "qty"))} value={g.qty} onChange={(e) => setIng(i, "qty", e.target.value)} placeholder="Qty" />
+              <select id={`rf-ing-unit-${i}`} aria-label="Unit" className={f(ingAi(g, "unit")) + " px-2"} value={g.unit} onChange={(e) => setIng(i, "unit", e.target.value)}>
                 {UNIT_OPTIONS.map((u) => (
                   <option key={u} value={u}>
                     {u || "each"}
                   </option>
                 ))}
               </select>
-              <select id={`rf-ing-aisle-${i}`} aria-label="Aisle" className={field + " px-2"} value={g.aisle} onChange={(e) => setIng(i, "aisle", e.target.value)}>
+              <select id={`rf-ing-aisle-${i}`} aria-label="Aisle" className={f(ingAi(g, "aisle")) + " px-2"} value={g.aisle} onChange={(e) => setIng(i, "aisle", e.target.value)}>
                 {AISLES.map((a) => (
                   <option key={a}>{a}</option>
                 ))}
@@ -657,17 +741,13 @@ function RecipeForm({ initial, onSave, onCancel, cuisines }) {
         </Btn>
       </div>
       <label className="block space-y-1">
-        <span className={label}>Short description</span>
-        <textarea id="rf-desc" rows={2} className={field} value={r.description || ""} onChange={(e) => set("description", e.target.value)} placeholder="What makes this one good" />
-      </label>
-      <label className="block space-y-1">
         <span className={label}>Steps (one per line)</span>
-        <textarea id="rf-steps" rows={6} className={field} value={r.stepsText} onChange={(e) => set("stepsText", e.target.value)} placeholder={"Brown the pork in a large pot.\nAdd the chiles and broth and simmer 40 minutes.\nStir in the hominy and serve with radishes and lime."} />
+        <textarea id="rf-steps" rows={6} className={f(ai.stepsText)} value={r.stepsText} onChange={(e) => set("stepsText", e.target.value)} placeholder={"Brown the pork in a large pot.\nAdd the chiles and broth and simmer 40 minutes.\nStir in the hominy and serve with radishes and lime."} />
       </label>
       {error && <p className="text-sm font-semibold text-danger">{error}</p>}
       <div className="flex justify-end gap-2 pt-1">
         <Btn onClick={onCancel}>Cancel</Btn>
-        <button type="submit" className="inline-flex items-center gap-1.5 rounded-xl bg-accent text-onaccent px-4 py-2.5 text-sm font-semibold hover:brightness-110">
+        <button type="submit" disabled={asking} className="inline-flex items-center gap-1.5 rounded-xl bg-accent text-onaccent px-4 py-2.5 text-sm font-semibold hover:brightness-110 disabled:opacity-60">
           <Check size={16} /> {initial ? "Save changes" : "Add to deck"}
         </button>
       </div>
@@ -959,6 +1039,19 @@ function SettingsModal({ settings, setSettings, onClose, onReset, store, sync, o
               : `Each recipe is scaled to feed ${s.household} once, so every dinner is a different recipe.`}
           </p>
         </div>
+        {store && store.askClaude && (
+          <div className="space-y-2">
+            <div className="font-semibold">Ask Claude model</div>
+            <div className="flex flex-wrap gap-1 rounded-xl bg-chip p-1">
+              {AI_MODELS.map(([id, name]) => (
+                <button key={id} type="button" onClick={() => upd("aiModel", id)} className={`rounded-lg px-3 py-1.5 text-sm font-semibold ${(s.aiModel || DEFAULT_AI_MODEL) === id ? "bg-surface text-ink shadow" : "text-muted"}`}>
+                  {name}
+                </button>
+              ))}
+            </div>
+            <p className="text-xs text-muted">{(AI_MODELS.find(([id]) => id === (s.aiModel || DEFAULT_AI_MODEL)) || AI_MODELS[0])[2]}. Used when Claude fills in a recipe for you.</p>
+          </div>
+        )}
         {store && store.mode === "supabase" && (
           <div className="flex items-center justify-between gap-3 rounded-2xl bg-chip/70 p-3">
             <div className="min-w-0 text-sm">
@@ -1610,7 +1703,7 @@ function Planner({ initial, store, onSignOut }) {
       )}
       {modal?.type === "form" && (
         <Modal title={modal.data ? "Edit recipe" : "Add a recipe"} onClose={() => setModal(null)} wide>
-          <RecipeForm initial={modal.data} onSave={saveRecipe} onCancel={() => setModal(null)} cuisines={cuisines} />
+          <RecipeForm initial={modal.data} onSave={saveRecipe} onCancel={() => setModal(null)} cuisines={cuisines} askClaude={store && store.askClaude ? (draft) => store.askClaude(draft, settings.units, settings.aiModel || DEFAULT_AI_MODEL) : null} />
         </Modal>
       )}
       {modal?.type === "json" && (
