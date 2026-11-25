@@ -1471,9 +1471,6 @@ function LibraryView({ onOpen, recipes, decisions, plan, onEdit, onDelete, onAdd
         <Btn variant="primary" onClick={onAdd}>
           <Plus size={16} /> Add recipe
         </Btn>
-        <Btn variant="soft" onClick={onJson}>
-          <Download size={15} /> JSON
-        </Btn>
       </div>
       {missingStarters > 0 && (
         <div className="flex items-center justify-between gap-3 rounded-2xl bg-chip px-4 py-3 text-sm">
@@ -1625,6 +1622,13 @@ function LibraryView({ onOpen, recipes, decisions, plan, onEdit, onDelete, onAdd
           })}
         </ul>
       </details>
+      {/* Bulk import/export lives at the very bottom: rarely needed, so it stays out of the way. */}
+      <div className="flex items-center justify-between gap-3 rounded-2xl border border-line px-4 py-3 text-sm">
+        <span className="text-muted">Import recipes or back up your deck as JSON.</span>
+        <Btn variant="soft" onClick={onJson}>
+          <Download size={15} /> JSON
+        </Btn>
+      </div>
     </div>
   );
 }
