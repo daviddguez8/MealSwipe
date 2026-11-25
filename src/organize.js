@@ -42,11 +42,13 @@ export function totalMin(r) {
 }
 
 // --- Time buckets -----------------------------------------------------------
+// Total minutes (prep + cook); a recipe goes in the first bucket whose max it fits.
 const TIME_BUCKETS = [
-  { key: "t30", label: "Under 30 min", max: 29 },
-  { key: "t45", label: "30 to 45 min", max: 45 },
-  { key: "t60", label: "45 to 60 min", max: 60 },
-  { key: "t60+", label: "Over 60 min", max: Infinity },
+  { key: "t15", label: "Very quick (under 15 min)", max: 14 },
+  { key: "t30", label: "Quick (15 to 30 min)", max: 30 },
+  { key: "t45", label: "Takes some time (30 to 45 min)", max: 45 },
+  { key: "t60", label: "Worth the wait (45 to 60 min)", max: 60 },
+  { key: "t60+", label: "Weekend project (over an hour)", max: Infinity },
 ];
 function timeBucket(r) {
   const t = totalMin(r);
