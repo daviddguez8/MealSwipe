@@ -2,7 +2,7 @@ import React, { useState, useMemo, useEffect, useRef, useCallback } from "react"
 import {
   X, Heart, Clock, Users, Plus, Minus, Trash2, Pencil, Settings, ListChecks, Layers, BookOpen,
   Copy, Check, Undo2, Shuffle, RotateCcw, Upload, Download, ChevronDown, ChevronUp, Search,
-  CalendarDays, ShoppingBasket, Info, Eye, EyeOff, ImagePlus, Camera, ChefHat, Maximize2, Cloud, CloudOff, LogOut, KeyRound, Loader2,
+  CalendarDays, ShoppingBasket, ArrowUpDown, LayoutList, Star, SlidersHorizontal, Info, Eye, EyeOff, ImagePlus, Camera, ChefHat, Maximize2, Cloud, CloudOff, LogOut, KeyRound, Loader2,
   Sparkles,
 } from "lucide-react";
 import { STARTER_RECIPES } from "./recipes.js";
@@ -14,7 +14,10 @@ import {
 } from "./lib.js";
 
 // All saving and loading lives in store.js (local browser storage or a shared Supabase household).
-import { createStore } from "./store.js";
+import { createStore, loadViewPrefs, saveViewPrefs } from "./store.js";
+import {
+  GROUP_OPTIONS, SORT_OPTIONS, FILTER_CATEGORIES, organizeRecipes, cleanView, sourceOf, filterOptions, emptyFilters, activeFilterCount,
+} from "./organize.js";
 
 // Photo for a recipe: your own upload/link wins, then the starter photo.
 function photoOf(recipe) {
@@ -1238,16 +1241,136 @@ function WeekView({ onOpen, planList, settings, setSettings, summary, setMult, r
 }
 
 // ---------------------------------------------------------------------------
-function LibraryView({ onOpen, recipes, decisions, plan, onEdit, onDelete, onAdd, onJson, onRestore, missingStarters, onToggleWeek, settings }) {
+// Small labelled dropdown used for Group by / Sort by.
+function ViewSelect({ id, icon: Icon, label, value, options, onChange }) {
+  return (
+    <label htmlFor={id} className="relative inline-flex items-center gap-1.5 rounded-xl border border-line bg-surface pl-3 pr-8 py-2 text-sm text-ink focus-within:border-accent">
+      <Icon size={15} className="text-muted shrink-0" />
+      <span className="text-muted whitespace-nowrap">{label}</span>
+      <select id={id} value={value} onChange={(e) => onChange(e.target.value)} className="appearance-none bg-transparent font-semibold focus:outline-none cursor-pointer">
+        {options.map((o) => (
+          <option key={o.value} value={o.value}>{o.label}</option>
+        ))}
+      </select>
+      <ChevronDown size={14} className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-muted" />
+    </label>
+  );
+}
+
+// "Filter by" panel: ingredient picker plus chips for each category.
+function Chip({ on, onClick, children, count }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={on}
+      className={`inline-flex items-center gap-1 rounded-full border px-3 py-1 text-xs font-semibold transition ${on ? "border-accent bg-accent text-white" : "border-line bg-surface text-ink hover:bg-chip"}`}
+    >
+      {children}
+      {count != null && <span className={on ? "opacity-80" : "text-muted"}>{count}</span>}
+    </button>
+  );
+}
+
+function FilterPanel({ options, filters, onToggle, onClear }) {
+  const [ingQ, setIngQ] = useState("");
+  const [showAll, setShowAll] = useState(false);
+  const ingAll = options.ingredients.filter((o) => o.label.includes(ingQ.trim().toLowerCase()));
+  const ingShown = showAll || ingQ.trim() ? ingAll : ingAll.slice(0, 16);
+  // Keep chosen ingredients visible even when they fall outside the short list.
+  const chosen = options.ingredients.filter((o) => filters.ingredients.includes(o.key) && !ingShown.includes(o));
+  return (
+    <div className="space-y-4 rounded-2xl border border-line bg-surface p-4">
+      <div>
+        <div className="mb-2 flex items-center justify-between gap-2">
+          <h4 className="text-sm font-bold">Ingredients <span className="font-normal text-muted">(has all chosen)</span></h4>
+          {activeFilterCount(filters) > 0 && (
+            <button type="button" onClick={onClear} className="text-xs font-semibold text-accent">Clear all</button>
+          )}
+        </div>
+        <div className="relative mb-2">
+          <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted" />
+          <input
+            id="filter-ing"
+            value={ingQ}
+            onChange={(e) => setIngQ(e.target.value)}
+            placeholder="Find an ingredient, like avocado"
+            className="w-full rounded-lg border border-line bg-bg pl-8 pr-3 py-1.5 text-sm text-ink focus:outline-none focus:border-accent"
+          />
+        </div>
+        <div className="flex flex-wrap gap-1.5">
+          {[...chosen, ...ingShown].map((o) => (
+            <Chip key={o.key} on={filters.ingredients.includes(o.key)} count={o.count} onClick={() => onToggle("ingredients", o.key)}>
+              {o.label}
+            </Chip>
+          ))}
+          {!ingQ.trim() && ingAll.length > 16 && (
+            <button type="button" onClick={() => setShowAll((v) => !v)} className="px-2 text-xs font-semibold text-muted hover:text-ink">
+              {showAll ? "Show fewer" : `Show all ${ingAll.length}`}
+            </button>
+          )}
+          {ingAll.length === 0 && <span className="text-xs text-muted">No ingredient matches "{ingQ.trim()}".</span>}
+        </div>
+      </div>
+      {FILTER_CATEGORIES.map((c) => (
+        <div key={c.value}>
+          <h4 className="mb-2 text-sm font-bold">{c.label}</h4>
+          <div className="flex flex-wrap gap-1.5">
+            {options[c.value].map((o) => (
+              <Chip key={o.key} on={filters[c.value].includes(o.key)} count={o.count} onClick={() => onToggle(c.value, o.key)}>
+                {o.label}
+              </Chip>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ratingOf(recipe) -> 1..5 or null. Wired to household ratings once they exist.
+function LibraryView({ onOpen, recipes, decisions, plan, onEdit, onDelete, onAdd, onJson, onRestore, missingStarters, onToggleWeek, settings, ratingOf, isHidden, onToggleHidden }) {
   const [q, setQ] = useState("");
   const [confirm, setConfirm] = useState(null);
-  const list = recipes.filter((r) => (r.title + " " + r.cuisine).toLowerCase().includes(q.toLowerCase()));
+  const [view, setViewState] = useState(() => cleanView(loadViewPrefs()));
+  const [collapsed, setCollapsed] = useState({});
+  const setView = (p) =>
+    setViewState((v) => {
+      const next = { ...v, ...p };
+      saveViewPrefs(next);
+      return next;
+    });
+  const [filters, setFilters] = useState(emptyFilters);
+  const [showFilters, setShowFilters] = useState(false);
+  const statusOf = useCallback(
+    (r) => (isHidden && isHidden(r) ? "hidden" : plan[r.id] != null ? "week" : decisions[r.id] === "pass" ? "passed" : "deck"),
+    [plan, decisions, isHidden]
+  );
+  const ctx = useMemo(() => ({ ratingOf, statusOf }), [ratingOf, statusOf]);
+  const options = useMemo(() => filterOptions(recipes, ctx), [recipes, ctx]);
+  const nFilters = activeFilterCount(filters);
+  const toggleFilter = (cat, key) =>
+    setFilters((f) => ({ ...f, [cat]: f[cat].includes(key) ? f[cat].filter((k) => k !== key) : [...f[cat], key] }));
+  // Chips for the active filters, shown under the controls.
+  const activeChips = [
+    ...filters.ingredients.map((k) => ({ cat: "ingredients", key: k, label: options.ingredients.find((o) => o.key === k)?.label || k })),
+    ...FILTER_CATEGORIES.flatMap((c) =>
+      filters[c.value].map((k) => ({ cat: c.value, key: k, label: options[c.value].find((o) => o.key === k)?.label || k }))
+    ),
+  ];
+  const groups = useMemo(
+    () => organizeRecipes(recipes, { q, groupBy: view.groupBy, sortBy: view.sortBy, filters, ctx }),
+    [recipes, q, view, filters, ctx]
+  );
+  const narrowed = q.trim() || nFilters > 0;
+  const shown = groups.reduce((n, g) => n + g.items.length, 0);
+  const grouped = view.groupBy !== "none";
   return (
     <div className="mx-auto max-w-3xl space-y-4">
       <div className="flex flex-wrap items-center gap-2">
         <div className="relative flex-1 min-w-[12rem]">
           <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted" />
-          <input id="lib-search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search recipes or cuisines" className="w-full rounded-xl border border-line bg-surface pl-9 pr-3 py-2.5 text-sm text-ink focus:outline-none focus:border-accent" />
+          <input id="lib-search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search recipes or ingredients" className="w-full rounded-xl border border-line bg-surface pl-9 pr-3 py-2.5 text-sm text-ink focus:outline-none focus:border-accent" />
         </div>
         <Btn variant="primary" onClick={onAdd}>
           <Plus size={16} /> Add recipe
@@ -1264,11 +1387,80 @@ function LibraryView({ onOpen, recipes, decisions, plan, onEdit, onDelete, onAdd
           </Btn>
         </div>
       )}
-      <p className="text-xs text-muted">{recipes.length} recipes in your deck. Edit any of them, or delete the ones you don't want to see again.</p>
+      <div className="flex flex-wrap items-center gap-2">
+        <ViewSelect id="lib-group" icon={LayoutList} label="Group by" value={view.groupBy} options={GROUP_OPTIONS} onChange={(groupBy) => { setView({ groupBy }); setCollapsed({}); }} />
+        <ViewSelect id="lib-sort" icon={ArrowUpDown} label="Sort" value={view.sortBy} options={SORT_OPTIONS} onChange={(sortBy) => setView({ sortBy })} />
+        <button
+          type="button"
+          id="lib-filter"
+          onClick={() => setShowFilters((v) => !v)}
+          aria-expanded={showFilters}
+          className={`inline-flex items-center gap-1.5 rounded-xl border px-3 py-2 text-sm font-semibold transition ${showFilters || nFilters ? "border-accent text-accent" : "border-line text-ink"} bg-surface hover:bg-chip`}
+        >
+          <SlidersHorizontal size={15} /> Filter
+          {nFilters > 0 && <span className="rounded-full bg-accent px-1.5 text-[11px] font-bold text-white">{nFilters}</span>}
+        </button>
+        {grouped && groups.length > 1 && (
+          <button
+            type="button"
+            className="text-xs font-semibold text-muted hover:text-ink px-1"
+            onClick={() => {
+              const allClosed = groups.every((g) => collapsed[g.key]);
+              setCollapsed(allClosed ? {} : Object.fromEntries(groups.map((g) => [g.key, true])));
+            }}
+          >
+            {groups.every((g) => collapsed[g.key]) ? "Expand all" : "Collapse all"}
+          </button>
+        )}
+      </div>
+      {showFilters && (
+        <FilterPanel options={options} filters={filters} onToggle={toggleFilter} onClear={() => setFilters(emptyFilters())} />
+      )}
+      {activeChips.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5">
+          {activeChips.map((c) => (
+            <button
+              key={c.cat + c.key}
+              type="button"
+              onClick={() => toggleFilter(c.cat, c.key)}
+              aria-label={`Remove filter ${c.label}`}
+              className="inline-flex items-center gap-1 rounded-full bg-accent/15 px-2.5 py-1 text-xs font-semibold text-accent"
+            >
+              {c.label} <X size={12} />
+            </button>
+          ))}
+          <button type="button" onClick={() => setFilters(emptyFilters())} className="px-1 text-xs font-semibold text-muted hover:text-ink">Clear</button>
+        </div>
+      )}
+      <p className="text-xs text-muted">
+        {narrowed ? `${shown} of ${recipes.length} recipes match. ` : `${recipes.length} recipes in your deck. `}
+        Edit any of them, or delete the ones you don't want to see again.
+      </p>
+      {shown === 0 && narrowed && (
+        <p className="rounded-2xl bg-chip px-4 py-6 text-center text-sm text-muted">
+          No recipes match{q.trim() ? ` "${q.trim()}"` : ""}{nFilters ? " with these filters" : ""}.
+        </p>
+      )}
+      {groups.map((g) => (
+      <section key={g.key} className="space-y-2.5">
+        {grouped && (
+          <button
+            type="button"
+            onClick={() => setCollapsed((c) => ({ ...c, [g.key]: !c[g.key] }))}
+            aria-expanded={!collapsed[g.key]}
+            className="flex w-full items-center gap-2 pt-2 text-left"
+          >
+            {collapsed[g.key] ? <ChevronDown size={16} className="text-muted -rotate-90" /> : <ChevronDown size={16} className="text-muted" />}
+            <h3 className="font-bold">{g.label}</h3>
+            <span className="rounded-full bg-chip px-2 py-0.5 text-[11px] font-bold text-muted">{g.items.length}</span>
+            <span className="h-px flex-1 bg-line" />
+          </button>
+        )}
+      {!(grouped && collapsed[g.key]) && (
       <ul className="grid gap-2.5 sm:grid-cols-2">
-        {list.map((r) => {
+        {g.items.map((r) => {
           const inWeek = plan[r.id] != null;
-          const state = inWeek ? "In this week" : decisions[r.id] === "pass" ? "Passed" : "In deck";
+          const state = isHidden && isHidden(r) ? "Hidden" : inWeek ? "In this week" : decisions[r.id] === "pass" ? "Passed" : "In deck";
           return (
             <li key={r.id} className="flex flex-col gap-3 rounded-2xl bg-surface border border-line p-3">
               <div className="flex gap-3">
@@ -1278,12 +1470,17 @@ function LibraryView({ onOpen, recipes, decisions, plan, onEdit, onDelete, onAdd
                   <div className="text-xs text-muted">
                     {r.cuisine} · {r.prepMin + r.cookMin} min · serves {r.servings} · {r.ingredients.length} ingredients
                   </div>
+                  {ratingOf && ratingOf(r) != null && (
+                    <div className="mt-0.5 inline-flex items-center gap-1 text-xs font-semibold text-accent" aria-label={`Rated ${ratingOf(r)} out of 5`}>
+                      <Star size={12} className="fill-current" /> {ratingOf(r)}
+                    </div>
+                  )}
                 </div>
               </div>
               <div className="flex items-center justify-between gap-2">
                 <span className={`rounded-full px-2.5 py-0.5 text-[11px] font-bold ${inWeek ? "bg-good/15 text-good" : "bg-chip text-muted"}`}>
                   {state}
-                  {r.custom ? " · yours" : ""}
+                  {sourceOf(r).key !== "classic" ? ` · ${sourceOf(r).short}` : ""}
                 </span>
                 {confirm === r.id ? (
                   <div className="flex items-center gap-1">
@@ -1298,9 +1495,17 @@ function LibraryView({ onOpen, recipes, decisions, plan, onEdit, onDelete, onAdd
                     <Btn onClick={() => onEdit(r)} aria-label={`Edit ${r.title}`}>
                       <Pencil size={15} />
                     </Btn>
-                    <Btn onClick={() => setConfirm(r.id)} aria-label={`Delete ${r.title}`}>
-                      <Trash2 size={15} />
-                    </Btn>
+                    {onToggleHidden && (
+                      <Btn onClick={() => onToggleHidden(r.id)} aria-label={`${r.hidden ? "Unhide" : "Hide"} ${r.title}`}>
+                        {r.hidden ? <Eye size={15} /> : <EyeOff size={15} />}
+                      </Btn>
+                    )}
+                    {/* MealSwipe recipes can only be hidden once hiding exists; your own can be deleted. */}
+                    {(!onToggleHidden || sourceOf(r).key === "own") && (
+                      <Btn onClick={() => setConfirm(r.id)} aria-label={`Delete ${r.title}`}>
+                        <Trash2 size={15} />
+                      </Btn>
+                    )}
                   </div>
                 )}
               </div>
@@ -1308,6 +1513,9 @@ function LibraryView({ onOpen, recipes, decisions, plan, onEdit, onDelete, onAdd
           );
         })}
       </ul>
+      )}
+      </section>
+      ))}
       <details className="rounded-2xl bg-chip/60 px-4 py-3 text-xs text-muted">
         <summary className="cursor-pointer font-bold">Photo credits</summary>
         <ul className="mt-2 space-y-1">
@@ -1337,6 +1545,11 @@ function Planner({ initial, store, onSignOut }) {
   const [detail, setDetail] = useState(null); // { id, fromDeck }
   const flyRef = useRef(null);
   const pendingMult = useRef(null);
+  // Household ratings ({ [recipeId]: 1..5 }); empty until ratings are stored.
+  const ratings = state.ratings;
+  const ratingOf = useCallback((r) => (ratings && ratings[r.id] != null ? ratings[r.id] : null), [ratings]);
+  // A recipe is hidden when recipe.hidden === true (set by the Hide feature).
+  const isHidden = useCallback((r) => r.hidden === true, []);
 
   useEffect(() => {
     store.onStatus((status, detail) => {
@@ -1670,6 +1883,8 @@ function Planner({ initial, store, onSignOut }) {
             onRestore={restoreStarters}
             missingStarters={missingStarters}
             onToggleWeek={toggleWeek}
+            ratingOf={ratingOf}
+            isHidden={isHidden}
             onOpen={(r) => setDetail({ id: r.id, fromDeck: false })}
           />
         )}
