@@ -23,10 +23,11 @@ The browser cannot read the table directly. It calls two functions, `ms_load(cod
 `ms_save` merges picks and checkmarks key by key, so two people editing at once don't overwrite each other.
 Live updates use a Supabase Realtime broadcast channel that only says "something changed"; the app then re-reads through `ms_load`. It also re-reads every 30 seconds and when the tab comes back into view.
 
-To add a household or change a passcode, run in the Supabase SQL editor:
+**Changing the passcode:** Household & settings → Change passcode. It asks for the current passcode, then calls `ms_change_passcode(code, new_code)` (at least 8 characters, must differ from the current one). That also gives the household a new realtime channel name. Other devices are told on the old channel, re-check, and get sent back to the passcode screen; any device that missed the ping finds out on its next 30-second check. The SQL is in `supabase/migrations/`.
+
+To add a household, run in the Supabase SQL editor:
 ```sql
 insert into households (name, passcode_hash) values ('Home', extensions.crypt('new-passcode', extensions.gen_salt('bf')));
-update households set passcode_hash = extensions.crypt('new-passcode', extensions.gen_salt('bf')) where name = 'Home';
 ```
 
 ## Meal math
