@@ -1236,7 +1236,7 @@ function FilterPanel({ options, filters, onToggle, onClear }) {
 }
 
 // ratingOf(recipe) -> 1..5 or null. Wired to household ratings once they exist.
-function LibraryView({ onOpen, recipes, decisions, plan, onEdit, onDelete, onAdd, onJson, onRestore, missingStarters, onToggleWeek, settings, ratingOf, isHidden }) {
+function LibraryView({ onOpen, recipes, decisions, plan, onEdit, onDelete, onAdd, onJson, onRestore, missingStarters, onToggleWeek, settings, ratingOf, isHidden, onToggleHidden }) {
   const [q, setQ] = useState("");
   const [confirm, setConfirm] = useState(null);
   const [view, setViewState] = useState(() => cleanView(loadViewPrefs()));
@@ -1402,9 +1402,17 @@ function LibraryView({ onOpen, recipes, decisions, plan, onEdit, onDelete, onAdd
                     <Btn onClick={() => onEdit(r)} aria-label={`Edit ${r.title}`}>
                       <Pencil size={15} />
                     </Btn>
-                    <Btn onClick={() => setConfirm(r.id)} aria-label={`Delete ${r.title}`}>
-                      <Trash2 size={15} />
-                    </Btn>
+                    {onToggleHidden && (
+                      <Btn onClick={() => onToggleHidden(r.id)} aria-label={`${r.hidden ? "Unhide" : "Hide"} ${r.title}`}>
+                        {r.hidden ? <Eye size={15} /> : <EyeOff size={15} />}
+                      </Btn>
+                    )}
+                    {/* MealSwipe recipes can only be hidden once hiding exists; your own can be deleted. */}
+                    {(!onToggleHidden || sourceOf(r).key === "own") && (
+                      <Btn onClick={() => setConfirm(r.id)} aria-label={`Delete ${r.title}`}>
+                        <Trash2 size={15} />
+                      </Btn>
+                    )}
                   </div>
                 )}
               </div>
@@ -1447,9 +1455,8 @@ function Planner({ initial, store, onSignOut }) {
   // Household ratings ({ [recipeId]: 1..5 }); empty until ratings are stored.
   const ratings = state.ratings;
   const ratingOf = useCallback((r) => (ratings && ratings[r.id] != null ? ratings[r.id] : null), [ratings]);
-  // Hidden recipes ({ [recipeId]: true }); empty until the Hide feature lands.
-  const hidden = state.hidden;
-  const isHidden = useCallback((r) => !!((hidden && hidden[r.id]) || r.hidden), [hidden]);
+  // A recipe is hidden when recipe.hidden === true (set by the Hide feature).
+  const isHidden = useCallback((r) => r.hidden === true, []);
 
   useEffect(() => {
     store.onStatus((status, detail) => {
